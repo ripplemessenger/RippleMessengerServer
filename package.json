@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@prisma/client": "^6.15.0",
+    "ajv": "^8.17.1",
+    "ripple-keypairs": "^2.0.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "prisma": "^6.15.0"
+  }
+}

@@ -1,0 +1,89 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Avatar {
+  address    String  @id
+  hash       String
+  size       Int
+  json       String
+  signed_at  BigInt
+  is_saved   Boolean @default(false) 
+}
+
+model Bulletin {
+  hash       String  @id
+  address    String
+  sequence   Int
+  content    String
+  json       String
+  signed_at  BigInt
+  created_at BigInt
+  pre_hash   String
+  next_hash  String?
+
+  tags       Tag[]
+  files       File[]
+}
+
+model Tag {
+  name      String  @id
+  bulletins Bulletin[]
+}
+
+model File {
+  hash         String  @id
+  size         Int
+  chunk_length Int
+  chunk_cursor Int
+  updated_at   BigInt
+  is_saved     Boolean @default(false) 
+
+  bulletins    Bulletin[]
+}
+
+model Reply {
+  post_hash  String
+  reply_hash String
+  signed_at  BigInt
+
+  @@id([post_hash, reply_hash])
+}
+
+model ECDH {
+  address1  String
+  address2  String
+  partition Int
+  sequence  Int
+  json1     String?
+  json2     String?
+
+  @@id([address1, address2, partition, sequence])
+}
+
+model PrivateMessage {
+  hash         String  @id
+  sour_address String
+  dest_address String
+  sequence     Int
+  signed_at    BigInt
+  json         String
+}
+
+model Group {
+  hash         String  @id
+  created_by   String
+  created_at   BigInt
+  create_json  String
+  member       String
+  deleted_at   BigInt?
+  delete_json  String?
+}
