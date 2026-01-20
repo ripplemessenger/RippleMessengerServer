@@ -1564,16 +1564,6 @@ function main() {
   fs.mkdirSync(path.resolve('./File'), { recursive: true })
   fs.mkdirSync(path.resolve('./AvatarFile'), { recursive: true })
 
-  let config = fs.readFileSync(ConfigPath, 'utf8')
-  config = JSON.parse(config)
-  ConsoleWarn(`*******Config:`)
-  console.log(config)
-  if (config.SelfURL !== '') {
-    SelfURL = config.SelfURL
-  }
-  NodeList = config.NodeList
-  console.log(NodeList)
-
   const seed = rippleKeyPairs.generateSeed("RandomSeed", 'secp256k1')
   const keypair = rippleKeyPairs.deriveKeypair(seed)
   SelfAddress = rippleKeyPairs.deriveAddress(keypair.publicKey)
@@ -1588,11 +1578,24 @@ function main() {
 
   // >>>>>>>>>>>>>>>>
   // Node Interaction
-  if (jobNodeConn === null) {
-    jobNodeConn = setInterval(keepNodeConn, 5000)
-  }
-  if (jobNodeSync === null) {
-    jobNodeSync = setInterval(keepNodeSync, 60 * 60 * 1000)
+  try {
+    let config = fs.readFileSync(ConfigPath, 'utf8')
+    config = JSON.parse(config)
+    ConsoleWarn(`*******Config:`)
+    console.log(config)
+    if (config.SelfURL !== '') {
+      SelfURL = config.SelfURL
+    }
+    NodeList = config.NodeList
+    console.log(NodeList)
+
+    if (jobNodeConn === null) {
+      jobNodeConn = setInterval(keepNodeConn, 5000)
+    }
+    if (jobNodeSync === null) {
+      jobNodeSync = setInterval(keepNodeSync, 60 * 60 * 1000)
+    }
+  } catch (error) {
   }
   // <<<<<<<<<<<<<<<<
 }

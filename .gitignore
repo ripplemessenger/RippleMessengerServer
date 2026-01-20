@@ -6,3 +6,5 @@ prisma/migrations
 
 AvatarFile
 File
+
+config.json
