@@ -1,7 +1,8 @@
 {
   "SelfURL": "",
-  "Seed": "",
   "NodeList": [
-    
+    {
+      "URL": "wss://jp.ripplemessenger.com"
+    }
   ]
 }

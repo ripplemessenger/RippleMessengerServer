@@ -19,11 +19,12 @@ let SelfPrivateKey
 let NodeList = []
 // client server daemon
 let ServerDaemon = null
-//client and node connection
+// client and node connection
 let Conns = {}
 // node conn
 let jobNodeConn = null
 let jobNodeSync = null
+let NodeConns = {}
 
 let FileRequestList = []
 let ChatFileRequestList = []
@@ -51,6 +52,15 @@ function fetchConnAddress(ws) {
   return null
 }
 
+function fetchNodeConnURL(ws) {
+  for (let url in NodeConns) {
+    if (NodeConns[url] === ws) {
+      return url
+    }
+  }
+  return null
+}
+
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 //client listener
 function teminateConn(ws) {
@@ -60,36 +70,15 @@ function teminateConn(ws) {
     ConsoleWarn(`###################LOG################### client disconnect... <${connAddress}>`)
     delete Conns[connAddress]
   }
+
+  let url = fetchNodeConnURL(ws)
+  if (url != null) {
+    ConsoleWarn(`###################LOG################### server disconnect... <${connAddress}>`)
+    delete NodeConns[url]
+  }
 }
 
 // file
-async function downloadBulletinFile(address) {
-  let file_list = await prisma.File.findMany({
-    where: {
-      is_saved: {
-        equals: true
-      }
-    }
-    // where: {
-    //   NOT: [
-    //     {
-    //       chunk_length: {
-    //         equals: prisma.Files.fields.chunk_cursor
-    //       }
-    //     }
-    //   ]
-    // }
-  })
-  if (file_list && file_list.length > 0) {
-    ConsoleInfo(`--------------------------files to download--------------------------`)
-    ConsoleInfo(file_list)
-    for (let i = 0; i < file_list.length; i++) {
-      const file = file_list[i]
-      // let msg = GenBulletinFileChunkRequest(file.hash, file.chunk_cursor + 1, address, SelfPublicKey, SelfPrivateKey)
-      // SendMessage(Conns[address], msg)
-    }
-  }
-}
 
 function genFileNonce() {
   let nonce = genNonce()
@@ -234,8 +223,6 @@ async function saveBufferFile(request, content) {
             } else {
               let hash = FileReadHash(path.resolve(file_path))
               if (hash !== request.Hash) {
-                // ConsoleWarn('239')
-                // console.log(hash)
                 fs.rmSync(path.resolve(file_path))
                 await prisma.File.update({
                   where: {
@@ -573,36 +560,6 @@ function HandelBulletinSubscribe(request, from) {
   }
 }
 
-// function pullBulletin(to) {
-//   // clone all bulletin from server
-//   // pull step 1: fetch all account
-//   let msg = GenBulletinAddressListRequest(1, SelfPublicKey, SelfPrivateKey)
-//   SendMessage(to, msg)
-// }
-
-// async function pushBulletin(to) {
-//   let bulletin_list = await prisma.Bulletin.findMany({
-//     select: {
-//       address: true,
-//       sequence: true
-//     }
-//   })
-//   let bulletin_sequence = {}
-//   bulletin_list.forEach(bulletin => {
-//     if (bulletin_sequence[bulletin.address] === undefined) {
-//       bulletin_sequence[bulletin.address] = bulletin.sequence
-//     } else if (bulletin_sequence[bulletin.address] < bulletin.sequence) {
-//       bulletin_sequence[bulletin.address] = bulletin.sequence
-//     }
-//   })
-
-//   for (const address in bulletin_sequence) {
-//     await DelayExec(1000)
-//     let msg = GenBulletinRequest(address, bulletin_sequence[address] + 1, address, SelfPublicKey, SelfPrivateKey)
-//     SendMessage(to, msg)
-//   }
-// }
-
 // ecdh
 async function CacheECDH(json) {
   let address1 = ""
@@ -928,6 +885,8 @@ async function handleObject(from, message, json) {
       }
       break
     case ObjectType.BulletinAddressList:
+      // >>>>>>>>>>>>>>>>
+      // Node Interaction
       // pull step 2: fetch account latest bulletin
       let items = json.List
       for (let i = 0; i < items.length; i++) {
@@ -971,8 +930,11 @@ async function handleObject(from, message, json) {
           SendMessage(from, bulletin_req)
         }
       }
-      let msg = GenBulletinAddressListRequest(json.Page + 1, SelfPublicKey, SelfPrivateKey)
-      SendMessage(from, msg)
+      if (json.Page !== json.TotalPage) {
+        let msg = GenBulletinAddressListRequest(json.Page + 1, SelfPublicKey, SelfPrivateKey)
+        SendMessage(from, msg)
+      }
+      // <<<<<<<<<<<<<<<<
       break
     case ObjectType.PrivateMessage:
       if (VerifyJsonSignature(json)) {
@@ -1091,8 +1053,7 @@ async function handleAction(from, message, json) {
       distinct: ['address']
     })
 
-    let total_page = calcTotalPage(total, PageSize)
-
+    let total_page = calcTotalPage(total.length, PageSize)
     if (address_list.length > 0) {
       let msg = GenBulletinAddressList(json.Page, total_page, address_list)
       SendMessage(from, msg)
@@ -1301,14 +1262,13 @@ async function checkMessage(ws, message) {
           if (json.URL != null && CheckServerURL(json.URL)) {
             // Server Conntion
             NodeList.push({
-              URL: json.URL,
-              Address: address
+              URL: json.URL
             })
             NodeList = UniqArray(NodeList)
-            let msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL)
-            SendMessage(address, msg)
           }
 
+          let msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL)
+          SendMessage(address, msg)
           SyncClientRequest(address)
         } else if (Conns[address] && Conns[address] !== ws && Conns[address].readyState === WebSocket.OPEN) {
           // new connection kick old conection with same address
@@ -1324,66 +1284,151 @@ async function checkMessage(ws, message) {
   }
 }
 
-// function SyncNodeData(address) {
-//   pullBulletin(address)
-//   pushBulletin(address)
-//   downloadBulletinFile(address)
-// }
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+// Node Interaction
+function SendToNode(url, message) {
+  if (NodeConns[url] != null && NodeConns[url].readyState === WebSocket.OPEN) {
+    NodeConns[url].send(message)
+  }
+}
 
-// function connectNode(node) {
-//   ConsoleInfo(`--------------------------connect to node--------------------------`)
-//   ConsoleWarn(node)
-//   let ws = new WebSocket(node.URL)
-//   ws.on('open', function open() {
-//     ConsoleWarn(`connected <===> ${node.URL}`)
-//     ws.send(GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL))
-//     Conns[node.Address] = ws
+function fetchFileFromNode(url, address, hash, chunk_cursor) {
+  let nonce = genFileNonce()
+  let tmp = {
+    Type: FileRequestType.File,
+    Nonce: nonce,
+    Hash: hash,
+    ChunkCursor: chunk_cursor,
+    Address: address,
+    Timestamp: Date.now()
+  }
+  let prev_request = FileRequestList.filter(r => r.Hash === hash)
+  if (prev_request.length === 0) {
+    FileRequestList.push(tmp)
+    let msg = GenFileRequest(FileRequestType.File, hash, nonce, chunk_cursor, SelfPublicKey, SelfPrivateKey)
+    SendToNode(url, msg)
+  }
+}
 
-//     SyncNodeData(node.Address)
-//   })
+async function downloadBulletinFile(url) {
+  let file_list = await prisma.File.findMany({
+    where: {
+      is_saved: {
+        equals: false
+      }
+    }
+    // where: {
+    //   NOT: [
+    //     {
+    //       chunk_length: {
+    //         equals: prisma.File.fields.chunk_cursor
+    //       }
+    //     }
+    //   ]
+    // }
+  })
+  if (file_list && file_list.length > 0) {
+    ConsoleInfo(`--------------------------files to download--------------------------`)
+    ConsoleInfo(file_list)
+    for (let i = 0; i < file_list.length; i++) {
+      const file = file_list[i]
+      fetchFileFromNode(url,)
+    }
+  }
+}
 
-//   ws.on('message', (data, isBinary) => {
-//     if (isBinary) {
-//     } else {
-//       let message = data.toString()
-//       checkMessage(ws, message)
-//     }
-//   })
+function pullBulletin(url) {
+  // clone all bulletin from server
+  // pull step 1: fetch all account
+  let msg = GenBulletinAddressListRequest(1, SelfPublicKey, SelfPrivateKey)
+  SendToNode(url, msg)
+}
 
-//   ws.on('close', function close() {
-//     ConsoleWarn(`disconnected <=X=> ${node.URL}`)
-//     teminateConn(ws)
-//   })
-// }
+async function pushBulletin(url) {
+  let bulletin_list = await prisma.Bulletin.findMany({
+    select: {
+      address: true,
+      sequence: true
+    }
+  })
+  let bulletin_sequence = {}
+  bulletin_list.forEach(bulletin => {
+    if (bulletin_sequence[bulletin.address] === undefined) {
+      bulletin_sequence[bulletin.address] = bulletin.sequence
+    } else if (bulletin_sequence[bulletin.address] < bulletin.sequence) {
+      bulletin_sequence[bulletin.address] = bulletin.sequence
+    }
+  })
 
-// function keepNodeConn() {
-//   let notConnected = []
-//   NodeList.forEach(node => {
-//     if (Conns[node.Address] === undefined) {
-//       notConnected.push(node)
-//     }
-//   })
+  for (const address in bulletin_sequence) {
+    await DelayExec(1000)
+    let msg = GenBulletinRequest(address, bulletin_sequence[address] + 1, address, SelfPublicKey, SelfPrivateKey)
+    SendToNode(url, msg)
+  }
+}
 
-//   if (notConnected.length === 0) {
-//     return
-//   }
-//   ConsoleWarn(`--------------------------keepNodeConn--------------------------`)
+function SyncNodeData(url) {
+  ConsoleWarn(`sync node data`)
+  pullBulletin(url)
+  pushBulletin(url)
+  // downloadBulletinFile(url)
+}
 
-//   let random = Math.floor(Math.random() * (notConnected.length))
-//   let randomNode = notConnected[random]
-//   if (randomNode != null) {
-//     connectNode(randomNode)
-//   }
-// }
+function connectNode(node) {
+  ConsoleInfo(`--------------------------connect to node--------------------------`)
+  ConsoleWarn(node)
+  let ws = new WebSocket(node.URL)
+  ws.on('open', function open() {
+    ConsoleWarn(`connected <===> ${node.URL}`)
+    ws.send(GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL))
+    NodeConns[node.URL] = ws
+    console.log(Conns)
+    SyncNodeData(node.URL)
+  })
 
-// function keepNodeSync() {
-//   ConsoleWarn(`--------------------------keepNodeSync--------------------------`)
-//   NodeList.forEach(node => {
-//     if (Conns[node.Address]) {
-//       SyncNodeData(node.Address)
-//     }
-//   })
-// }
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+    } else {
+      let message = data.toString()
+      checkMessage(ws, message)
+    }
+  })
+
+  ws.on('close', function close() {
+    ConsoleWarn(`disconnected <=X=> ${node.URL}`)
+    teminateConn(ws)
+  })
+}
+
+function keepNodeConn() {
+  let notConnected = []
+  NodeList.forEach(node => {
+    if (NodeConns[node.URL] === undefined) {
+      notConnected.push(node)
+    }
+  })
+
+  if (notConnected.length === 0) {
+    return
+  }
+  ConsoleWarn(`--------------------------keepNodeConn--------------------------`)
+
+  let random = Math.floor(Math.random() * (notConnected.length))
+  let randomNode = notConnected[random]
+  if (randomNode != null) {
+    connectNode(randomNode)
+  }
+}
+
+function keepNodeSync() {
+  ConsoleWarn(`--------------------------keepNodeSync--------------------------`)
+  NodeList.forEach(node => {
+    if (NodeConns[node.URL]) {
+      SyncNodeData(node.URL)
+    }
+  })
+}
+// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 async function loadGroupMap() {
   let group_list = await prisma.Group.findMany()
@@ -1526,13 +1571,11 @@ function main() {
   if (config.SelfURL !== '') {
     SelfURL = config.SelfURL
   }
-  let seed = config.Seed
   NodeList = config.NodeList
+  console.log(NodeList)
 
-  if (seed === "") {
-    seed = rippleKeyPairs.generateSeed("RandomSeed", 'secp256k1')
-  }
-  let keypair = rippleKeyPairs.deriveKeypair(seed)
+  const seed = rippleKeyPairs.generateSeed("RandomSeed", 'secp256k1')
+  const keypair = rippleKeyPairs.deriveKeypair(seed)
   SelfAddress = rippleKeyPairs.deriveAddress(keypair.publicKey)
   SelfPublicKey = keypair.publicKey
   SelfPrivateKey = keypair.privateKey
@@ -1543,12 +1586,15 @@ function main() {
   refreshData()
   startServerDaemon()
 
-  // if (jobNodeConn === null) {
-  //   jobNodeConn = setInterval(keepNodeConn, 5000)
-  // }
-  // if (jobNodeSync === null) {
-  //   jobNodeSync = setInterval(keepNodeSync, 8 * 60 * 60 * 1000)
-  // }
+  // >>>>>>>>>>>>>>>>
+  // Node Interaction
+  if (jobNodeConn === null) {
+    jobNodeConn = setInterval(keepNodeConn, 5000)
+  }
+  if (jobNodeSync === null) {
+    jobNodeSync = setInterval(keepNodeSync, 60 * 60 * 1000)
+  }
+  // <<<<<<<<<<<<<<<<
 }
 
 main()

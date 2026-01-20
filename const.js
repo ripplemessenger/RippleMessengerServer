@@ -2,12 +2,10 @@
 const ConfigPath = './config.json'
 // config_json =
 // {
-//   "SelfURL": "wss://jp.ripplemessenger.com",
-//   "Seed": "xxJTfMGZPavnqHhcEcHw5ToPCHftw",
+//   "SelfURL": "",
 //   "NodeList": [
 //     {
-//       "URL": "wss://jp.ripplemessenger.com",
-//       "Address": "rBTC99bat6K8LAMWoxSvBxWw3HtVpSQLAV"
+//       "URL": "wss://jp.ripplemessenger.com"
 //     }
 //   ]
 // }

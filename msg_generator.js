@@ -49,7 +49,7 @@ function GenBulletinRequest(address, sequence, to, pk, sk) {
 
 function GenBulletinAddressListRequest(page, pk, sk) {
   let json = {
-    Action: ActionCode.BulletinAddressListRequest,
+    Action: ActionCode.BulletinAddressRequest,
     Page: page,
     Timestamp: Date.now(),
     PublicKey: pk

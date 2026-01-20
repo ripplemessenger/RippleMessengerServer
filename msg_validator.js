@@ -358,6 +358,8 @@ function MsgValidate(strJson) {
           console.log(json)
           return false
       }
+    } else {
+      return false
     }
   } else {
     return false

@@ -159,7 +159,7 @@ function genNonce() {
 function calcTotalPage(total, page_size) {
   let total_page = Math.floor(total / page_size)
   if (total_page !== total / page_size) {
-    total_page + 1
+    total_page = total_page + 1
   }
   return total_page
 }
