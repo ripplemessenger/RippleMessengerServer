@@ -246,6 +246,19 @@ function checkPrivateMessageSchema(json) {
 }
 
 const vPrivateMessageSyncSchema = ajv.compile(PrivateMessageSyncSchema)
+function checkPrivateMessageSyncSchema(json) {
+  try {
+    if (vPrivateMessageSyncSchema(json)) {
+      return json
+    } else {
+      ConsoleWarn(`PrivateMessageSyncSchema invalid...`)
+      console.log(json)
+      return false
+    }
+  } catch (e) {
+    return false
+  }
+}
 
 // Group
 const vGroupSyncSchema = ajv.compile(GroupSyncSchema)
@@ -278,6 +291,19 @@ function checkGroupListSchema(json) {
   }
 }
 const vGroupMessageSyncSchema = ajv.compile(GroupMessageSyncSchema)
+function checkGroupMessageSyncSchema(json) {
+  try {
+    if (vGroupMessageSyncSchema(json)) {
+      return json
+    } else {
+      ConsoleWarn(`GroupMessageSyncSchema invalid...`)
+      console.log(json)
+      return false
+    }
+  } catch (e) {
+    return false
+  }
+}
 const vGroupMessageListSchema = ajv.compile(GroupMessageListSchema)
 function checkGroupMessageListSchema(json) {
   try {
@@ -326,8 +352,12 @@ function MsgValidate(strJson) {
           return checkTagBulletinRequestSchema(json)
         case ActionCode.BulletinRandomRequest:
           return checkBulletinRandomRequestSchema(json)
+        case ActionCode.PrivateMessageSync:
+          return checkPrivateMessageSyncSchema(json)
         case ActionCode.GroupSync:
           return checkGroupSyncSchema(json)
+        case ActionCode.GroupMessageSync:
+          return checkGroupMessageSyncSchema(json)
         default:
           ConsoleWarn(`json schema invalid...`)
           console.log(json)

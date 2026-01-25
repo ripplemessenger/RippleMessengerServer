@@ -657,6 +657,9 @@ async function HandelECDHSync(json) {
   let address2 = ""
   let sour_address = rippleKeyPairs.deriveAddress(json.PublicKey)
   let dest_address = json.To
+  if (sour_address === dest_address) {
+    return
+  }
   if (sour_address > dest_address) {
     address1 = sour_address
     address2 = dest_address
@@ -851,7 +854,7 @@ async function CacheGroup(group) {
 function SendMessage(address, message) {
   // ConsoleInfo(`###################LOG################### Send Message:`)
   // ConsoleWarn(message)
-  if (Conns[address] != null && Conns[address].readyState === WebSocket.OPEN) {
+  if (Conns[address] && Conns[address].readyState === WebSocket.OPEN) {
     Conns[address].send(message)
   }
 }
@@ -1148,6 +1151,18 @@ async function handleAction(from, message, json) {
     HandelPrivateMessageSync(json)
   } else if (json.Action === ActionCode.GroupSync) {
     HandelGroupSync(from, json)
+  } else if (json.Action === ActionCode.GroupMessageSync) {
+    let members = GroupMap[json.Hash]
+    if (members) {
+      for (let i = 0; i < members.length; i++) {
+        const member = members[i]
+        if (from !== member && Conns[member] && Conns[member].readyState === WebSocket.OPEN) {
+          SendMessage(member, message)
+        }
+      }
+    } else {
+
+    }
   }
 }
 
@@ -1224,6 +1239,7 @@ async function checkMessage(ws, message) {
   ConsoleInfo(`${message}`)
   // ConsoleInfo(`${message.slice(0, 512)}`)
   let json = MsgValidate(message)
+  // console.log(json)
   if (json === false) {
     // sendServerMessage(ws, MessageCode.JsonSchemaInvalid)
     teminateConn(ws)
