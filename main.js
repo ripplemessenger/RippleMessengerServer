@@ -79,7 +79,6 @@ function teminateConn(ws) {
 }
 
 // file
-
 function genFileNonce() {
   let nonce = genNonce()
   for (let i = 0; i < FileRequestList.length; i++) {
@@ -170,7 +169,6 @@ async function saveBufferFile(request, content) {
       }
       break
     case FileRequestType.File:
-      console.log(request)
       let file_dir = `./File/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}`
       fs.mkdirSync(path.resolve(file_dir), { recursive: true })
       let file_path = `${file_dir}/${request.Hash}`
@@ -190,7 +188,6 @@ async function saveBufferFile(request, content) {
       })
       if (file !== null) {
         if (file.chunk_cursor === file.chunk_length) {
-          console.log(file)
           fs.rmSync(path.resolve(file_path))
           await prisma.File.update({
             where: {
@@ -1265,6 +1262,7 @@ async function checkMessage(ws, message) {
               URL: json.URL
             })
             NodeList = UniqArray(NodeList)
+            SyncNodeData(json.URL)
           }
 
           let msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL)
@@ -1311,6 +1309,11 @@ function fetchFileFromNode(url, address, hash, chunk_cursor) {
 }
 
 async function downloadBulletinFile(url) {
+  let address = fetchConnAddress(NodeConns[url])
+  if (address === null) {
+    return
+  }
+
   let file_list = await prisma.File.findMany({
     where: {
       is_saved: {
@@ -1328,11 +1331,9 @@ async function downloadBulletinFile(url) {
     // }
   })
   if (file_list && file_list.length > 0) {
-    ConsoleInfo(`--------------------------files to download--------------------------`)
-    ConsoleInfo(file_list)
     for (let i = 0; i < file_list.length; i++) {
       const file = file_list[i]
-      fetchFileFromNode(url,)
+      fetchFileFromNode(url, address, file.hash, file.chunk_cursor + 1)
     }
   }
 }
@@ -1371,7 +1372,7 @@ function SyncNodeData(url) {
   ConsoleWarn(`sync node data`)
   pullBulletin(url)
   pushBulletin(url)
-  // downloadBulletinFile(url)
+  downloadBulletinFile(url)
 }
 
 function connectNode(node) {
@@ -1388,6 +1389,21 @@ function connectNode(node) {
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
+      const nonce = BufferToUint32(Uint8Array.prototype.slice.call(data, 0, 4))
+      const content = Uint8Array.prototype.slice.call(data, 4)
+      for (let i = 0; i < FileRequestList.length; i++) {
+        const request = FileRequestList[i]
+        if (request.Nonce === nonce) {
+          if (request.Type === FileRequestType.ChatFile) {
+            // forward
+            FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
+            SendMessage(request.From, data)
+          } else {
+            saveBufferFile(request, content)
+          }
+          break
+        }
+      }
     } else {
       let message = data.toString()
       checkMessage(ws, message)
