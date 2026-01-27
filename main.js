@@ -27,7 +27,6 @@ let jobNodeSync = null
 let NodeConns = {}
 
 let FileRequestList = []
-let ChatFileRequestList = []
 
 let GroupMap = {}
 let SubscribeMap = {}
@@ -122,9 +121,9 @@ function fetchFile(from, address, hash, chunk_cursor) {
   }
 }
 
-function fetchChatFile(from, json) {
+function fetchPrivateChatFile(from, json) {
   let tmp = {
-    Type: FileRequestType.ChatFile,
+    Type: FileRequestType.PrivateChatFile,
     Nonce: json.Nonce,
     From: from,
     // To: json.To,
@@ -307,9 +306,9 @@ async function HandelFileRequest(request, from) {
         })
       }
       break
-    case FileRequestType.ChatFile:
+    case FileRequestType.PrivateChatFile:
       // already forword, save relay info
-      fetchChatFile(from, request)
+      fetchPrivateChatFile(from, request)
       break
     default:
       break
@@ -1410,7 +1409,7 @@ function connectNode(node) {
       for (let i = 0; i < FileRequestList.length; i++) {
         const request = FileRequestList[i]
         if (request.Nonce === nonce) {
-          if (request.Type === FileRequestType.ChatFile) {
+          if (request.Type === FileRequestType.PrivateChatFile) {
             // forward
             FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
             SendMessage(request.From, data)
@@ -1565,7 +1564,7 @@ function startServerDaemon() {
           for (let i = 0; i < FileRequestList.length; i++) {
             const request = FileRequestList[i]
             if (request.Nonce === nonce) {
-              if (request.Type === FileRequestType.ChatFile) {
+              if (request.Type === FileRequestType.PrivateChatFile) {
                 // forward
                 FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
                 SendMessage(request.From, data)
