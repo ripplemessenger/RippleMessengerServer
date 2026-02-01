@@ -103,7 +103,7 @@ function fetchAvatarFile(from, address, hash) {
   SendMessage(from, msg)
 }
 
-function fetchFile(from, address, hash, chunk_cursor) {
+function fetchBulletinFile(from, address, hash, chunk_cursor) {
   let nonce = genFileNonce()
   let tmp = {
     Type: FileRequestType.File,
@@ -113,15 +113,14 @@ function fetchFile(from, address, hash, chunk_cursor) {
     Address: address,
     Timestamp: Date.now()
   }
-  let prev_request = FileRequestList.filter(r => r.Hash === hash)
-  if (prev_request.length === 0) {
-    FileRequestList.push(tmp)
-    let msg = GenFileRequest(FileRequestType.File, hash, nonce, chunk_cursor, SelfPublicKey, SelfPrivateKey)
-    SendMessage(from, msg)
-  }
+  FileRequestList = FileRequestList.filter(r => r.Timestamp + 120 * 1000 > Date.now())
+  FileRequestList = FileRequestList.filter(r => !(r.Hash === hash && r.Address === address))
+  FileRequestList.push(tmp)
+  let msg = GenFileRequest(FileRequestType.File, hash, nonce, chunk_cursor, SelfPublicKey, SelfPrivateKey)
+  SendMessage(from, msg)
 }
 
-function fetchPrivateChatFile(from, json) {
+function cachePrivateFileRequest(from, json) {
   let tmp = {
     Type: FileRequestType.PrivateChatFile,
     Nonce: json.Nonce,
@@ -131,13 +130,24 @@ function fetchPrivateChatFile(from, json) {
     // ChunkCursor: json.ChunkCursor,
     Timestamp: json.Timestamp
   }
-  let prev_request = FileRequestList.filter(r => r.Hash === json.Hash)
-  if (prev_request.length === 0) {
-    FileRequestList.push(tmp)
-  } else if (json.Timestamp > prev_request[0].Timestamp) {
-    FileRequestList = FileRequestList.filter(r => r.Hash !== json.Hash)
-    FileRequestList.push(tmp)
+  FileRequestList = FileRequestList.filter(r => r.Timestamp + 120 * 1000 > Date.now())
+  FileRequestList = FileRequestList.filter(r => !(r.Hash === json.Hash && r.From === from))
+  FileRequestList.push(tmp)
+}
+
+function cacheGroupFileRequest(from, json) {
+  let tmp = {
+    Type: FileRequestType.GroupChatFile,
+    Nonce: json.Nonce,
+    From: from,
+    // To: json.To,
+    Hash: json.Hash,
+    // ChunkCursor: json.ChunkCursor,
+    Timestamp: json.Timestamp
   }
+  FileRequestList = FileRequestList.filter(r => r.Timestamp + 120 * 1000 > Date.now())
+  FileRequestList = FileRequestList.filter(r => !(r.Hash === json.Hash && r.From === from))
+  FileRequestList.push(tmp)
 }
 
 async function saveBufferFile(request, content) {
@@ -196,7 +206,7 @@ async function saveBufferFile(request, content) {
               chunk_cursor: 0
             }
           })
-          fetchFile(request.Address, request.Address, request.Hash, 1)
+          fetchBulletinFile(request.Address, request.Address, request.Hash, 1)
         } else if (file.chunk_cursor < file.chunk_length && file.chunk_cursor + 1 === request.ChunkCursor) {
           fs.appendFile(file_path, content, async (err) => {
             if (err) {
@@ -215,7 +225,7 @@ async function saveBufferFile(request, content) {
               }
             })
             if (current_chunk_cursor < file.chunk_length) {
-              fetchFile(request.Address, request.Address, request.Hash, current_chunk_cursor + 1)
+              fetchBulletinFile(request.Address, request.Address, request.Hash, current_chunk_cursor + 1)
             } else {
               let hash = FileReadHash(path.resolve(file_path))
               if (hash !== request.Hash) {
@@ -228,7 +238,7 @@ async function saveBufferFile(request, content) {
                     chunk_cursor: 0
                   }
                 })
-                fetchFile(request.Address, request.Address, request.Hash, 1)
+                fetchBulletinFile(request.Address, request.Address, request.Hash, 1)
               } else {
                 await prisma.File.update({
                   where: {
@@ -250,6 +260,7 @@ async function saveBufferFile(request, content) {
 }
 
 async function HandelFileRequest(request, from) {
+  // console.log(request)
   // send cache file
   switch (request.FileType) {
     case FileRequestType.Avatar:
@@ -308,7 +319,23 @@ async function HandelFileRequest(request, from) {
       break
     case FileRequestType.PrivateChatFile:
       // already forword, save relay info
-      fetchPrivateChatFile(from, request)
+      cachePrivateFileRequest(from, request)
+      break
+    case FileRequestType.GroupChatFile:
+      cacheGroupFileRequest(from, request)
+      let members = GroupMap[request.GroupHash]
+      if (members) {
+        for (let i = 0; i < members.length; i++) {
+          const member = members[i]
+          // ConsoleWarn(member)
+          if (from !== member && Conns[member] && Conns[member].readyState === WebSocket.OPEN) {
+            // ConsoleError(member)
+            // TODO Random
+            SendMessage(member, JSON.stringify(request))
+            return
+          }
+        }
+      }
       break
     default:
       break
@@ -517,7 +544,7 @@ async function CacheBulletin(from, bulletin) {
       if (bulletin.File) {
         let files_to_fetch = await BindBulletinFile(hash, bulletin.File)
         files_to_fetch.forEach(file => {
-          fetchFile(from, bulletin_address, file.hash, file.chunk_cursor + 1)
+          fetchBulletinFile(from, bulletin_address, file.hash, file.chunk_cursor + 1)
         })
       }
 
@@ -691,7 +718,7 @@ async function HandelECDHSync(json) {
 // private
 async function CachePrivateMessage(json) {
   let str_json = JSON.stringify(json)
-  let hash = QuarterSHA512(json)
+  let hash = QuarterSHA512Message(json)
   let sour_address = rippleKeyPairs.deriveAddress(json.PublicKey)
   let dest_address = json.To
   let msg_list = await prisma.PrivateMessage.findMany({
@@ -966,15 +993,9 @@ async function handleObject(from, message, json) {
       }
       break
     case ObjectType.GroupMessageList:
-      let db_g = await prisma.Group.findFirst({
-        where: {
-          hash: json.Hash
-        }
-      })
-      if (db_g !== null) {
-        let member = JSON.parse(db_g.member)
-        member.push(db_g.created_by)
-        if (member.includes(from) && member.includes(json.To)) {
+      let members = GroupMap[json.Hash]
+      if (members) {
+        if (members.includes(from) && members.includes(json.To)) {
           SendMessage(json.To, message)
         }
       }
@@ -1200,7 +1221,7 @@ async function SyncClientRequest(address) {
     }
   })
   file_list.forEach(async file => {
-    fetchFile(address, address, file.hash, file.chunk_cursor + 1)
+    fetchBulletinFile(address, address, file.hash, file.chunk_cursor + 1)
   })
 
   // ecdh
@@ -1409,7 +1430,7 @@ function connectNode(node) {
       for (let i = 0; i < FileRequestList.length; i++) {
         const request = FileRequestList[i]
         if (request.Nonce === nonce) {
-          if (request.Type === FileRequestType.PrivateChatFile) {
+          if (request.Type === FileRequestType.PrivateChatFile || request.Type === FileRequestType.GroupChatFile) {
             // forward
             FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
             SendMessage(request.From, data)
@@ -1560,12 +1581,13 @@ function startServerDaemon() {
       ws.on("message", (data, isBinary) => {
         if (isBinary) {
           const nonce = BufferToUint32(Uint8Array.prototype.slice.call(data, 0, 4))
+          ConsoleWarn(nonce)
           const content = Uint8Array.prototype.slice.call(data, 4)
           for (let i = 0; i < FileRequestList.length; i++) {
             const request = FileRequestList[i]
             if (request.Nonce === nonce) {
-              if (request.Type === FileRequestType.PrivateChatFile) {
-                // forward
+              if (request.Type === FileRequestType.PrivateChatFile || request.Type === FileRequestType.GroupChatFile) {
+                // forward file data
                 FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
                 SendMessage(request.From, data)
               } else {
