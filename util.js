@@ -183,6 +183,17 @@ function BufferToUint32(buf, isBigEndian = true) {
     : buf.readUInt32LE(0)
 }
 
+function shuffleArray(arr) {
+  const newArr = [...arr]
+  let len = newArr.length
+  while (len > 1) {
+    const randomIdx = Math.floor(Math.random() * len)
+    len--
+    [newArr[len], newArr[randomIdx]] = [newArr[randomIdx], newArr[len]]
+  }
+  return newArr
+}
+
 export {
   ConsoleInfo,
   ConsoleWarn,
@@ -209,5 +220,6 @@ export {
   genNonce,
   calcTotalPage,
   Uint32ToBuffer,
-  BufferToUint32
+  BufferToUint32,
+  shuffleArray
 }

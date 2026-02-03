@@ -5,7 +5,7 @@ import rippleKeyPairs from "ripple-keypairs"
 import { PrismaClient } from "@prisma/client"
 const prisma = new PrismaClient()
 
-import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage } from './util.js'
+import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
 import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
 import { ConfigPath, FileChunkSize, PageSize } from './const.js'
 import { GenDeclare, GenBulletinAddressListRequest, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenBulletinAddressList, GenReplyBulletinList, GenTagBulletinList } from './msg_generator.js'
@@ -325,12 +325,10 @@ async function HandelFileRequest(request, from) {
       cacheGroupFileRequest(from, request)
       let members = GroupMap[request.GroupHash]
       if (members) {
-        for (let i = 0; i < members.length; i++) {
-          const member = members[i]
-          // ConsoleWarn(member)
+        let tmp_members = shuffleArray(members)
+        for (let i = 0; i < tmp_members.length; i++) {
+          const member = tmp_members[i]
           if (from !== member && Conns[member] && Conns[member].readyState === WebSocket.OPEN) {
-            // ConsoleError(member)
-            // TODO Random
             SendMessage(member, JSON.stringify(request))
             return
           }
@@ -823,11 +821,13 @@ async function HandelGroupSync(from) {
         group_create_json_list.push(JSON.parse(group.create_json))
       }
     }
-    let group_response = {
-      ObjectType: ObjectType.GroupList,
-      List: group_create_json_list
+    if (group_create_json_list.length > 0) {
+      let group_response = {
+        ObjectType: ObjectType.GroupList,
+        List: group_create_json_list
+      }
+      SendMessage(from, JSON.stringify(group_response))
     }
-    SendMessage(from, JSON.stringify(group_response))
   }
 }
 
