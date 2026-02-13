@@ -17,6 +17,9 @@ const BulletinFileExtRegex = /jpg|png|jpeg|txt|md/i
 
 const PageSize = 20
 
+const FileDir = 'file'
+const AvatarDir = 'avatar'
+
 const MessageCode = {
   JsonSchemaInvalid: 0, //json schema invalid...
   SignatureInvalid: 1, //signature invalid...
@@ -37,5 +40,7 @@ export {
   FileMaxSize,
   BulletinFileExtRegex,
   PageSize,
+  FileDir,
+  AvatarDir,
   MessageCode
 }

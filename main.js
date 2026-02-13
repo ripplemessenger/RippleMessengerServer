@@ -7,7 +7,7 @@ const prisma = new PrismaClient()
 
 import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
 import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
-import { ConfigPath, FileChunkSize, PageSize } from './const.js'
+import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize } from './const.js'
 import { GenDeclare, GenBulletinAddressListRequest, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenBulletinAddressList, GenReplyBulletinList, GenTagBulletinList } from './msg_generator.js'
 import { MsgValidate } from './msg_validator.js'
 
@@ -155,7 +155,7 @@ async function saveBufferFile(request, content) {
     case FileRequestType.Avatar:
       const content_hash = FileBufferHash(content)
       if (request.Hash === content_hash) {
-        let avatar_dir = `./AvatarFile/${request.Address.substring(1, 4)}/${request.Address.substring(4, 7)}`
+        let avatar_dir = `./${AvatarDir}/${request.Address.substring(1, 4)}/${request.Address.substring(4, 7)}`
         fs.mkdirSync(path.resolve(avatar_dir), { recursive: true })
         let avatar_path = `${avatar_dir}/${request.Address}.png`
         fs.writeFile(avatar_path, content, async (err) => {
@@ -178,7 +178,7 @@ async function saveBufferFile(request, content) {
       }
       break
     case FileRequestType.File:
-      let file_dir = `./File/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}`
+      let file_dir = `./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}`
       fs.mkdirSync(path.resolve(file_dir), { recursive: true })
       let file_path = `${file_dir}/${request.Hash}`
       let file = await prisma.File.findFirst({
@@ -272,7 +272,7 @@ async function HandelFileRequest(request, from) {
           address: true
         }
       })
-      let avatar_file_path = path.resolve(`./AvatarFile/${avatar.address.substring(1, 4)}/${avatar.address.substring(4, 7)}/${avatar.address}.png`)
+      let avatar_file_path = path.resolve(`./${AvatarDir}/${avatar.address.substring(1, 4)}/${avatar.address.substring(4, 7)}/${avatar.address}.png`)
       let buffer = fs.readFileSync(avatar_file_path)
       const nonce = Uint32ToBuffer(request.Nonce)
       SendMessage(from, Buffer.concat([nonce, buffer]))
@@ -295,7 +295,7 @@ async function HandelFileRequest(request, from) {
         let start = (request.ChunkCursor - 1) * FileChunkSize
         let file_left = file.size - start
         let length = Math.min(FileChunkSize, file_left)
-        let file_path = path.resolve(`./File/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}/${request.Hash}`)
+        let file_path = path.resolve(`./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}/${request.Hash}`)
         fs.open(file_path, 'r', async (err, fd) => {
           if (err) return console.error(err)
           const buffer = Buffer.alloc(length)
@@ -1007,7 +1007,7 @@ async function handleObject(from, message, json) {
 
 // handle Action
 async function handleAction(from, message, json) {
-  if (json.To != null) {
+  if (json.To != undefined) {
     // forward message
     SendMessage(json.To, message)
   }
@@ -1174,14 +1174,14 @@ async function handleAction(from, message, json) {
   } else if (json.Action === ActionCode.GroupMessageSync) {
     let members = GroupMap[json.Hash]
     if (members) {
-      for (let i = 0; i < members.length; i++) {
-        const member = members[i]
+      let tmp_members = shuffleArray(members)
+      for (let i = 0; i < tmp_members.length; i++) {
+        const member = tmp_members[i]
         if (from !== member && Conns[member] && Conns[member].readyState === WebSocket.OPEN) {
           SendMessage(member, message)
+          return
         }
       }
-    } else {
-
     }
   }
 }
@@ -1614,8 +1614,8 @@ function startServerDaemon() {
 }
 
 function main() {
-  fs.mkdirSync(path.resolve('./File'), { recursive: true })
-  fs.mkdirSync(path.resolve('./AvatarFile'), { recursive: true })
+  fs.mkdirSync(path.resolve(`./${FileDir}`), { recursive: true })
+  fs.mkdirSync(path.resolve(`./${AvatarDir}`), { recursive: true })
 
   const seed = rippleKeyPairs.generateSeed("RandomSeed", 'secp256k1')
   const keypair = rippleKeyPairs.deriveKeypair(seed)
