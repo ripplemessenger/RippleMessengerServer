@@ -260,7 +260,6 @@ async function saveBufferFile(request, content) {
 }
 
 async function HandelFileRequest(request, from) {
-  // console.log(request)
   // send cache file
   switch (request.FileType) {
     case FileRequestType.Avatar:
@@ -719,24 +718,20 @@ async function CachePrivateMessage(json) {
   let hash = QuarterSHA512Message(json)
   let sour_address = rippleKeyPairs.deriveAddress(json.PublicKey)
   let dest_address = json.To
-  let msg_list = await prisma.PrivateMessage.findMany({
+  let last_msg = await prisma.PrivateMessage.findFirst({
     where: {
       sour_address: sour_address,
-      dest_address: dest_address,
-      sequence: {
-        lt: json.Sequence
-      }
+      dest_address: dest_address
     },
     orderBy: {
-      sequence: "asc"
+      sequence: "desc"
     },
     select: {
       sequence: true,
       hash: true
     }
   })
-  let msg_list_length = msg_list.length
-  if ((msg_list_length === 0 && json.Sequence === 1 && json.PreHash === GenesisHash) || (msg_list_length != 0 && msg_list_length === msg_list[msg_list_length - 1].sequence && json.Sequence === msg_list_length + 1 && json.PreHash === msg_list[msg_list_length - 1].hash)) {
+  if ((last_msg === null && json.Sequence === 1 && json.PreHash === GenesisHash) || (last_msg !== null && json.Sequence === last_msg.sequence + 1 && json.PreHash === last_msg.hash)) {
     await prisma.PrivateMessage.create({
       data: {
         hash: hash,
@@ -747,12 +742,11 @@ async function CachePrivateMessage(json) {
         json: str_json
       }
     })
-  } else {
-    let current_sequence = 0
-    if (msg_list_length != 0) {
-      current_sequence = msg_list_length
-    }
-    let msg = GenPrivateMessageSync(dest_address, current_sequence, SelfPublicKey, SelfPrivateKey)
+  } else if (last_msg === null) {
+    let msg = GenPrivateMessageSync(dest_address, 0, SelfPublicKey, SelfPrivateKey)
+    SendMessage(sour_address, msg)
+  } else if (last_msg !== null && last_msg.sequence < json.Sequence) {
+    let msg = GenPrivateMessageSync(dest_address, last_msg.sequence, SelfPublicKey, SelfPrivateKey)
     SendMessage(sour_address, msg)
   }
 }
