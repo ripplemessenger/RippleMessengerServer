@@ -1148,7 +1148,7 @@ async function handleAction(from, message, json) {
       total_page = calcTotalPage(total, PageSize)
     }
     if (tmp_list.length > 0) {
-      let msg = GenTagBulletinList(json.Hash, json.Page, total_page, tmp_list)
+      let msg = GenTagBulletinList(json.Tag, json.Page, total_page, tmp_list)
       SendMessage(from, msg)
     }
   } else if (json.Action === ActionCode.FileRequest) {
