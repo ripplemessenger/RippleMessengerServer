@@ -399,6 +399,7 @@ async function HandelAvatarReqeust(request, from) {
         address: avatar.Address
       },
       select: {
+        is_saved: true,
         signed_at: true,
         json: true
       }
