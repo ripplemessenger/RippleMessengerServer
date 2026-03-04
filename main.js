@@ -405,7 +405,7 @@ async function HandelAvatarReqeust(request, from) {
     })
 
     if (db_avatar !== null) {
-      if (db_avatar.signed_at > avatar.SignedAt) {
+      if (db_avatar.signed_at > avatar.SignedAt && db_avatar.is_saved) {
         new_list.push(JSON.parse(db_avatar.json))
       } else if (db_avatar.signed_at < avatar.SignedAt) {
         old_list.push({ Address: avatar.Address, SignedAt: db_avatar.signed_at })
