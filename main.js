@@ -163,9 +163,7 @@ async function saveBufferFile(request, content) {
             console.log(err.message)
             return
           }
-          console.log(FileRequestList)
           FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
-          console.log(FileRequestList)
           await prisma.Avatar.update({
             where: {
               address: request.Address
