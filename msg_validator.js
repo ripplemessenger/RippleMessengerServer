@@ -1,5 +1,5 @@
 import Ajv from 'ajv'
-import { DeclareSchema, BulletinSchema, RandomBulletinRequestSchema, BulletinRequestSchema, BulletinAddressRequestSchema, BulletinAddressListSchema, ReplyBulletinRequestSchema, ECDHHandshakeSchema, PrivateMessageSchema, PrivateMessageSyncSchema, FileRequestSchema, AvatarRequestSchema, GroupMessageSyncSchema, AvatarListSchema, GroupListSchema, GroupSyncSchema, GroupMessageListSchema, BulletinSubscribeSchema, ReplyBulletinListSchema, TagBulletinListSchema, TagBulletinRequestSchema } from './msg_schema.js'
+import { DeclareSchema, BulletinSchema, RandomBulletinRequestSchema, BulletinRequestSchema, ReplyBulletinRequestSchema, ECDHHandshakeSchema, PrivateMessageSchema, PrivateMessageSyncSchema, FileRequestSchema, AvatarRequestSchema, GroupMessageSyncSchema, AvatarListSchema, GroupListSchema, GroupSyncSchema, GroupMessageListSchema, BulletinSubscribeSchema, ReplyBulletinListSchema, TagBulletinListSchema, TagBulletinRequestSchema, ServerAddressListSchema, ServerAddressRequestSchema } from './msg_schema.js'
 import { ConsoleWarn } from './util.js'
 import { ActionCode, ObjectType } from './msg_const.js'
 
@@ -111,13 +111,13 @@ function checkBulletinRequestSchema(json) {
   }
 }
 
-const vBulletinAddressRequestSchema = ajv.compile(BulletinAddressRequestSchema)
-function checkBulletinAddressRequestSchema(json) {
+const vServerAddressRequestSchema = ajv.compile(ServerAddressRequestSchema)
+function checkServerAddressRequestSchema(json) {
   try {
-    if (vBulletinAddressRequestSchema(json)) {
+    if (vServerAddressRequestSchema(json)) {
       return json
     } else {
-      ConsoleWarn(`BulletinAddressRequestSchema invalid...`)
+      ConsoleWarn(`ServerAddressRequestSchema invalid...`)
       console.log(json)
       return false
     }
@@ -125,13 +125,13 @@ function checkBulletinAddressRequestSchema(json) {
     return false
   }
 }
-const vBulletinAddressListSchema = ajv.compile(BulletinAddressListSchema)
-function checkBulletinAddressListSchema(json) {
+const vServerAddressListSchema = ajv.compile(ServerAddressListSchema)
+function checkServerAddressListSchema(json) {
   try {
-    if (vBulletinAddressListSchema(json)) {
+    if (vServerAddressListSchema(json)) {
       return json
     } else {
-      ConsoleWarn(`BulletinAddressListSchema invalid...`)
+      ConsoleWarn(`ServerAddressListSchema invalid...`)
       console.log(json)
       return false
     }
@@ -344,8 +344,8 @@ function MsgValidate(strJson) {
           return checkBulletinRequestSchema(json)
         case ActionCode.BulletinSubscribe:
           return checkBulletinSubscribeSchema(json)
-        case ActionCode.BulletinAddressRequest:
-          return checkBulletinAddressRequestSchema(json)
+        case ActionCode.ServerAddressRequest:
+          return checkServerAddressRequestSchema(json)
         case ActionCode.ReplyBulletinRequest:
           return checkReplyBulletinRequestSchema(json)
         case ActionCode.TagBulletinRequest:
@@ -369,8 +369,8 @@ function MsgValidate(strJson) {
           return checkAvatarListSchema(json)
         case ObjectType.Bulletin:
           return checkBulletinSchema(json)
-        case ObjectType.BulletinAddressList:
-          return checkBulletinAddressListSchema(json)
+        case ObjectType.ServerAddressList:
+          return checkServerAddressListSchema(json)
         case ObjectType.ReplyBulletinList:
           return checkReplyBulletinListSchema(json)
         case ObjectType.TagBulletinList:

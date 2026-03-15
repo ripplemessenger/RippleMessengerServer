@@ -233,12 +233,12 @@ const RandomBulletinRequestSchema = {
 // Action>>>
 // Client => Server
 // BulletinCount DESC
-const BulletinAddressRequestSchema = {
+const ServerAddressRequestSchema = {
   "type": "object",
   "required": ["Action", "Page", "Timestamp", "PublicKey", "Signature"],
   "maxProperties": 6,
   "properties": {
-    "Action": { "type": "number", "const": ActionCode.BulletinAddressRequest },
+    "Action": { "type": "number", "const": ActionCode.ServerAddressRequest },
     "Page": { "type": "number" },
     "Timestamp": { "type": "number" },
     "PublicKey": { "type": "string" },
@@ -248,12 +248,12 @@ const BulletinAddressRequestSchema = {
 
 // Object>>>
 // Server => Client
-const BulletinAddressListSchema = {
+const ServerAddressListSchema = {
   "type": "object",
   "required": ["ObjectType", "Page", "TotalPage", "List"],
   "maxProperties": 4,
   "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.BulletinAddressList },
+    "ObjectType": { "type": "number", "const": ObjectType.ServerAddressList },
     "Page": { "type": "number" },
     "TotalPage": { "type": "number" },
     "List": {
@@ -818,8 +818,8 @@ export {
   BulletinSchema,
   BulletinSubscribeSchema,
   BulletinRequestSchema,
-  BulletinAddressRequestSchema,
-  BulletinAddressListSchema,
+  ServerAddressRequestSchema,
+  ServerAddressListSchema,
   ReplyBulletinRequestSchema,
   ReplyBulletinListSchema,
   TagBulletinRequestSchema,

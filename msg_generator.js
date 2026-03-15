@@ -47,9 +47,9 @@ function GenBulletinRequest(address, sequence, to, pk, sk) {
   return JSON.stringify(SignJson(json, sk))
 }
 
-function GenBulletinAddressListRequest(page, pk, sk) {
+function GenServerAddressListRequest(page, pk, sk) {
   let json = {
-    Action: ActionCode.BulletinAddressRequest,
+    Action: ActionCode.ServerAddressRequest,
     Page: page,
     Timestamp: Date.now(),
     PublicKey: pk
@@ -57,9 +57,9 @@ function GenBulletinAddressListRequest(page, pk, sk) {
   return JSON.stringify(SignJson(json, sk))
 }
 
-function GenBulletinAddressList(page, total_page, address_list) {
+function GenServerAddressList(page, total_page, address_list) {
   let json = {
-    ObjectType: ObjectType.BulletinAddressList,
+    ObjectType: ObjectType.ServerAddressList,
     Page: page,
     TotalPage: total_page,
     List: address_list
@@ -126,8 +126,8 @@ export {
   GenAvatarRequest,
 
   GenBulletinRequest,
-  GenBulletinAddressListRequest,
-  GenBulletinAddressList,
+  GenServerAddressListRequest,
+  GenServerAddressList,
   GenReplyBulletinList,
   GenTagBulletinList,
   GenRandomBulletinList,

@@ -20,7 +20,7 @@ const ActionCode = {
   BulletinRequest: 400,
   BulletinSubscribe: 401,
   RandomBulletinRequest: 402,
-  BulletinAddressRequest: 403,
+  ServerAddressRequest: 403,
   ReplyBulletinRequest: 404,
   TagBulletinRequest: 405,
 
@@ -46,7 +46,7 @@ const ObjectType = {
   Bulletin: 400,
   // 401
   // 402
-  BulletinAddressList: 403,
+  ServerAddressList: 403,
   ReplyBulletinList: 404,
   TagBulletinList: 405,
   RandomBulletinList: 406,

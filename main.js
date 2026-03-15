@@ -8,7 +8,7 @@ const prisma = new PrismaClient()
 import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
 import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
 import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize } from './const.js'
-import { GenDeclare, GenBulletinAddressListRequest, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenBulletinAddressList, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList } from './msg_generator.js'
+import { GenDeclare, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList, GenServerAddressListRequest, GenServerAddressList } from './msg_generator.js'
 import { MsgValidate } from './msg_validator.js'
 
 let SelfURL = undefined
@@ -903,7 +903,7 @@ async function handleObject(from, message, json) {
         }
       }
       break
-    case ObjectType.BulletinAddressList:
+    case ObjectType.ServerAddressList:
       // >>>>>>>>>>>>>>>>
       // Node Interaction
       // pull step 2: fetch account latest bulletin
@@ -950,7 +950,7 @@ async function handleObject(from, message, json) {
         }
       }
       if (json.Page !== json.TotalPage) {
-        let msg = GenBulletinAddressListRequest(json.Page + 1, SelfPublicKey, SelfPrivateKey)
+        let msg = GenServerAddressListRequest(json.Page + 1, SelfPublicKey, SelfPrivateKey)
         SendMessage(from, msg)
       }
       // <<<<<<<<<<<<<<<<
@@ -1039,7 +1039,7 @@ async function handleAction(from, message, json) {
     }
   } else if (json.Action === ActionCode.BulletinSubscribe) {
     HandelBulletinSubscribe(json)
-  } else if (json.Action === ActionCode.BulletinAddressRequest && json.Page > 0) {
+  } else if (json.Action === ActionCode.ServerAddressRequest && json.Page > 0) {
     let result = await prisma.Bulletin.groupBy({
       by: "address",
       _count: {
@@ -1068,7 +1068,7 @@ async function handleAction(from, message, json) {
 
     let total_page = calcTotalPage(total.length, PageSize)
     if (address_list.length > 0) {
-      let msg = GenBulletinAddressList(json.Page, total_page, address_list)
+      let msg = GenServerAddressList(json.Page, total_page, address_list)
       SendMessage(from, msg)
     }
   } else if (json.Action === ActionCode.ReplyBulletinRequest && json.Page > 0) {
@@ -1375,7 +1375,7 @@ async function downloadBulletinFile(url) {
 function pullBulletin(url) {
   // clone all bulletin from server
   // pull step 1: fetch all account
-  let msg = GenBulletinAddressListRequest(1, SelfPublicKey, SelfPrivateKey)
+  let msg = GenServerAddressListRequest(1, SelfPublicKey, SelfPrivateKey)
   SendToNode(url, msg)
 }
 
