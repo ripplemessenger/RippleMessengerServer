@@ -89,6 +89,14 @@ function GenTagBulletinList(tag, page, total_page, bulletin_list) {
   return JSON.stringify(json)
 }
 
+function GenRandomBulletinList(bulletin_list) {
+  let json = {
+    ObjectType: ObjectType.RandomBulletinList,
+    List: bulletin_list
+  }
+  return JSON.stringify(json)
+}
+
 // ***Private***
 function GenPrivateMessageSync(pair_address, current_sequence, pk, sk) {
   let json = {
@@ -122,6 +130,7 @@ export {
   GenBulletinAddressList,
   GenReplyBulletinList,
   GenTagBulletinList,
+  GenRandomBulletinList,
 
   GenPrivateMessageSync,
 

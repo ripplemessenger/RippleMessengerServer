@@ -1,5 +1,5 @@
 import Ajv from 'ajv'
-import { DeclareSchema, BulletinSchema, BulletinRandomRequestSchema, BulletinRequestSchema, BulletinAddressRequestSchema, BulletinAddressListSchema, ReplyBulletinRequestSchema, ECDHHandshakeSchema, PrivateMessageSchema, PrivateMessageSyncSchema, FileRequestSchema, AvatarRequestSchema, GroupMessageSyncSchema, AvatarListSchema, GroupListSchema, GroupSyncSchema, GroupMessageListSchema, BulletinSubscribeSchema, ReplyBulletinListSchema, TagBulletinListSchema, TagBulletinRequestSchema } from './msg_schema.js'
+import { DeclareSchema, BulletinSchema, RandomBulletinRequestSchema, BulletinRequestSchema, BulletinAddressRequestSchema, BulletinAddressListSchema, ReplyBulletinRequestSchema, ECDHHandshakeSchema, PrivateMessageSchema, PrivateMessageSyncSchema, FileRequestSchema, AvatarRequestSchema, GroupMessageSyncSchema, AvatarListSchema, GroupListSchema, GroupSyncSchema, GroupMessageListSchema, BulletinSubscribeSchema, ReplyBulletinListSchema, TagBulletinListSchema, TagBulletinRequestSchema } from './msg_schema.js'
 import { ConsoleWarn } from './util.js'
 import { ActionCode, ObjectType } from './msg_const.js'
 
@@ -198,13 +198,13 @@ function checkTagBulletinListSchema(json) {
   }
 }
 
-const vBulletinRandomRequestSchema = ajv.compile(BulletinRandomRequestSchema)
-function checkBulletinRandomRequestSchema(json) {
+const vRandomBulletinRequestSchema = ajv.compile(RandomBulletinRequestSchema)
+function checkRandomBulletinRequestSchema(json) {
   try {
-    if (vBulletinRandomRequestSchema(json)) {
+    if (vRandomBulletinRequestSchema(json)) {
       return json
     } else {
-      ConsoleWarn(`BulletinRandomRequestSchema invalid...`)
+      ConsoleWarn(`RandomBulletinRequestSchema invalid...`)
       console.log(json)
       return false
     }
@@ -350,8 +350,8 @@ function MsgValidate(strJson) {
           return checkReplyBulletinRequestSchema(json)
         case ActionCode.TagBulletinRequest:
           return checkTagBulletinRequestSchema(json)
-        case ActionCode.BulletinRandomRequest:
-          return checkBulletinRandomRequestSchema(json)
+        case ActionCode.RandomBulletinRequest:
+          return checkRandomBulletinRequestSchema(json)
         case ActionCode.PrivateMessageSync:
           return checkPrivateMessageSyncSchema(json)
         case ActionCode.GroupSync:
@@ -375,6 +375,8 @@ function MsgValidate(strJson) {
           return checkReplyBulletinListSchema(json)
         case ObjectType.TagBulletinList:
           return checkTagBulletinListSchema(json)
+        case ObjectType.RandomBulletinList:
+          return checkRandomBulletinRequestSchema(json)
         case ObjectType.ECDH:
           return checkECDHHandshakeSchema(json)
         case ObjectType.PrivateMessage:

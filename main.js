@@ -8,7 +8,7 @@ const prisma = new PrismaClient()
 import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
 import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
 import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize } from './const.js'
-import { GenDeclare, GenBulletinAddressListRequest, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenBulletinAddressList, GenReplyBulletinList, GenTagBulletinList } from './msg_generator.js'
+import { GenDeclare, GenBulletinAddressListRequest, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenBulletinAddressList, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList } from './msg_generator.js'
 import { MsgValidate } from './msg_validator.js'
 
 let SelfURL = undefined
@@ -1150,16 +1150,21 @@ async function handleAction(from, message, json) {
       let msg = GenTagBulletinList(json.Tag, json.Page, total_page, tmp_list)
       SendMessage(from, msg)
     }
+  } else if (json.Action === ActionCode.RandomBulletinRequest) {
+    const list = await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ORDER BY RANDOM() LIMIT ${20}`
+    let tmp_list = []
+    list.forEach(bulletin => {
+      tmp_list.push(JSON.parse(bulletin.json))
+    })
+
+    if (tmp_list.length > 0) {
+      let msg = GenRandomBulletinList(tmp_list)
+      SendMessage(from, msg)
+    }
   } else if (json.Action === ActionCode.FileRequest) {
     HandelFileRequest(json, from)
   } else if (json.Action === ActionCode.AvatarRequest) {
     HandelAvatarReqeust(json, from)
-  } else if (json.Action === ActionCode.BulletinRandomRequest) {
-    //send random bulletin
-    let bulletins = await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ORDER BY RANDOM() LIMIT 1`
-    if (bulletins != null && bulletins.length != 0) {
-      SendMessage(from, bulletins[0].json)
-    }
   } else if (json.Action === ActionCode.PrivateMessageSync) {
     HandelPrivateMessageSync(json)
   } else if (json.Action === ActionCode.GroupSync) {

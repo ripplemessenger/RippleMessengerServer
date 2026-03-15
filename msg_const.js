@@ -19,7 +19,7 @@ const ActionCode = {
   // bulletin
   BulletinRequest: 400,
   BulletinSubscribe: 401,
-  BulletinRandomRequest: 402,
+  RandomBulletinRequest: 402,
   BulletinAddressRequest: 403,
   ReplyBulletinRequest: 404,
   TagBulletinRequest: 405,
@@ -49,6 +49,7 @@ const ObjectType = {
   BulletinAddressList: 403,
   ReplyBulletinList: 404,
   TagBulletinList: 405,
+  RandomBulletinList: 406,
 
   // private
   PrivateMessage: 500,
