@@ -47,6 +47,17 @@ function GenBulletinRequest(address, sequence, to, pk, sk) {
   return JSON.stringify(SignJson(json, sk))
 }
 
+function GenBulletinRequestByHash(hash, to, pk, sk) {
+  let json = {
+    Action: ActionCode.BulletinRequest,
+    Hash: hash,
+    To: to,
+    Timestamp: Date.now(),
+    PublicKey: pk
+  }
+  return JSON.stringify(SignJson(json, sk))
+}
+
 function GenServerAddressListRequest(page, pk, sk) {
   let json = {
     Action: ActionCode.ServerAddressRequest,
@@ -126,6 +137,7 @@ export {
   GenAvatarRequest,
 
   GenBulletinRequest,
+  GenBulletinRequestByHash,
   GenServerAddressListRequest,
   GenServerAddressList,
   GenReplyBulletinList,

@@ -8,7 +8,7 @@ const prisma = new PrismaClient()
 import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
 import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
 import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize } from './const.js'
-import { GenDeclare, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList, GenServerAddressListRequest, GenServerAddressList } from './msg_generator.js'
+import { GenDeclare, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList, GenServerAddressListRequest, GenServerAddressList, GenBulletinRequestByHash } from './msg_generator.js'
 import { MsgValidate } from './msg_validator.js'
 
 let SelfURL = undefined
@@ -407,7 +407,7 @@ async function HandelAvatarReqeust(request, from) {
       if (db_avatar.signed_at > avatar.SignedAt && db_avatar.is_saved) {
         new_list.push(JSON.parse(db_avatar.json))
       } else if (db_avatar.signed_at < avatar.SignedAt) {
-        old_list.push({ Address: avatar.Address, SignedAt: db_avatar.signed_at })
+        old_list.push({ Address: avatar.Address, SignedAt: Number(db_avatar.signed_at) })
       }
     } else if (avatar.SignedAt !== Epoch) {
       old_list.push({ Address: avatar.Address, SignedAt: Epoch })
@@ -1117,6 +1117,19 @@ async function handleAction(from, message, json) {
     if (tmp_list.length > 0) {
       let msg = GenReplyBulletinList(json.Hash, json.Page, total_page, tmp_list)
       SendMessage(from, msg)
+    } else {
+      let post_bulletin = await prisma.Bulletin.findFirst({
+        where: {
+          hash: json.Hash
+        },
+        select: {
+          hash: true
+        }
+      })
+      if (post_bulletin === null) {
+        let msg = GenBulletinRequestByHash(json.Hash, from, SelfPublicKey, SelfPrivateKey)
+        SendMessage(from, msg)
+      }
     }
   } else if (json.Action === ActionCode.TagBulletinRequest && json.Page > 0) {
     const whereCondition = {
@@ -1301,6 +1314,7 @@ async function checkMessage(ws, message) {
 
           let msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL)
           SendMessage(address, msg)
+          await DelayExec(1000)
           SyncClientRequest(address)
         } else if (Conns[address] && Conns[address] !== ws && Conns[address].readyState === WebSocket.OPEN) {
           // new connection kick old conection with same address
