@@ -561,11 +561,15 @@ async function CacheBulletin(from, bulletin) {
   }
 }
 
-function HandelBulletinSubscribe(request, from) {
+function clearSubscribe(address) {
   Object.entries(SubscribeMap).forEach(([key, value]) => {
-    let new_value = value.filter(a => a !== from)
+    let new_value = value.filter(a => a !== address)
     SubscribeMap[key] = new_value
   })
+}
+
+function HandelBulletinSubscribe(request, from) {
+  clearSubscribe(from)
   for (let i = 0; i < request.List.length; i++) {
     const subscribe_address = request.List[i]
     if (subscribe_address !== from) {
@@ -1038,7 +1042,7 @@ async function handleAction(from, message, json) {
       }
     }
   } else if (json.Action === ActionCode.BulletinSubscribe) {
-    HandelBulletinSubscribe(json)
+    HandelBulletinSubscribe(json, from)
   } else if (json.Action === ActionCode.ServerAddressRequest && json.Page > 0) {
     let result = await prisma.Bulletin.groupBy({
       by: "address",
@@ -1619,6 +1623,7 @@ function startServerDaemon() {
         if (connAddress != null) {
           ConsoleWarn(`client <${connAddress}> disconnect...`)
           delete Conns[connAddress]
+          clearSubscribe(connAddress)
         }
       })
     })
