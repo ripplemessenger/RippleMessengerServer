@@ -17,6 +17,8 @@ let SelfPublicKey
 let SelfPrivateKey
 
 let NodeList = []
+let WhiteList = []
+
 // client server daemon
 let ServerDaemon = null
 // client and node connection
@@ -1322,6 +1324,17 @@ async function checkMessage(ws, message) {
         }
 
         if (connAddress === null && Conns[address] === undefined && json.Action === ActionCode.Declare) {
+          if (!isAddressAllowed(address)) {
+            ConsoleWarn(`❌ Connection rejected - address not in whitelist: ${address}`)
+            ws.send(JSON.stringify({
+              Action: "Error",
+              Code: "NotInWhitelist",
+              Message: "Your address is not in the whitelist"
+            }))
+            teminateConn(ws)
+            return
+          }
+
           // new connection and new address
           ConsoleWarn(`connected <===> client : <${address}>`)
           Conns[address] = ws
@@ -1675,6 +1688,13 @@ function main() {
   refreshData()
   startServerDaemon()
 
+  function isAddressAllowed(address) {
+    if (!WhiteList || WhiteList.length === 0) {
+      return true
+    }
+    return WhiteList.includes(address)
+  }
+
   // >>>>>>>>>>>>>>>>
   // Node Interaction
   try {
@@ -1687,6 +1707,14 @@ function main() {
     }
     NodeList = config.NodeList
     console.log(NodeList)
+
+    WhiteList = Array.isArray(config.WhiteList) ? config.WhiteList : []
+    ConsoleWarn(`WhiteList loaded: ${WhiteList.length} addresses`)
+    if (WhiteList.length > 0) {
+      ConsoleWarn('⚠️  WhiteList mode enabled - only whitelisted addresses can connect')
+    } else {
+      ConsoleWarn('🌐  WhiteList is empty - open to all addresses')
+    }
 
     if (jobNodeConn === null) {
       jobNodeConn = setInterval(keepNodeConn, 5000)
