@@ -427,45 +427,60 @@ async function HandelAvatarReqeust(request, from) {
 }
 
 async function BindBulletinTag(bulletin_hash, tags) {
-  return await prisma.Bulletin.update({
-    where: { hash: bulletin_hash },
-    data: {
-      tags: {
-        connectOrCreate: tags.map(name => ({
-          where: { name: name },
-          create: { name: name }
-        }))
-      }
-    },
-    include: { tags: true }
+  if (!tags || tags.length === 0) return null
+
+  const uniqueTags = [...new Set(tags)]
+
+  return await prisma.$transaction(async (tx) => {
+    await tx.Tag.createMany({
+      data: uniqueTags.map(name => ({ name: name })),
+      skipDuplicates: true
+    })
+
+    return await tx.Bulletin.update({
+      where: { hash: bulletin_hash },
+      data: {
+        tags: {
+          connect: uniqueTags.map(name => ({ name }))
+        }
+      },
+      include: { tags: true }
+    })
   })
 }
 
 async function BindBulletinFile(bulletin_hash, files) {
-  let result = await prisma.Bulletin.update({
-    where: { hash: bulletin_hash },
-    data: {
-      files: {
-        connectOrCreate: files.map(file => ({
-          where: { hash: file.Hash },
-          create: {
-            hash: file.Hash,
-            size: file.Size,
-            chunk_length: Math.ceil(file.Size / FileChunkSize),
-            chunk_cursor: 0,
-            updated_at: Date.now(),
-            is_saved: false
+  return await prisma.$transaction(async (tx) => {
+    const fetchedFiles = []
+
+    for (const f of files) {
+      const fileRecord = await tx.File.upsert({
+        where: { hash: f.Hash },
+        update: {},
+        create: {
+          hash: f.Hash,
+          size: f.Size,
+          chunk_length: Math.ceil(f.Size / FileChunkSize),
+          chunk_cursor: 0,
+          updated_at: Date.now(),
+          is_saved: false
+        }
+      })
+
+      fetchedFiles.push(fileRecord)
+
+      await tx.Bulletin.update({
+        where: { hash: bulletin_hash },
+        data: {
+          files: {
+            connect: { hash: f.Hash }
           }
-        }))
-      }
-    },
-    include: { files: true }
+        }
+      })
+    }
+
+    return fetchedFiles
   })
-  if (result.files.length > 0) {
-    return result.files
-  } else {
-    return []
-  }
 }
 
 // bulletin
@@ -511,8 +526,8 @@ async function CacheBulletin(from, bulletin) {
       }
 
       // create tag
-      if (bulletin.Tag) {
-        result = await BindBulletinTag(hash, bulletin.Tag)
+      if (bulletin.Tag && Array.isArray(bulletin.Tag) && bulletin.Tag.length > 0) {
+        await BindBulletinTag(hash, bulletin.Tag)
       }
 
       // create quote
@@ -539,9 +554,12 @@ async function CacheBulletin(from, bulletin) {
       // create file
       if (bulletin.File) {
         let files_to_fetch = await BindBulletinFile(hash, bulletin.File)
-        files_to_fetch.forEach(file => {
-          fetchBulletinFile(from, bulletin_address, file.hash, file.chunk_cursor + 1)
-        })
+        for (let i = 0; i < files_to_fetch.length; i++) {
+          const file = files_to_fetch[i]
+          if (!file.is_saved) {
+            fetchBulletinFile(from, bulletin_address, file.hash, file.chunk_cursor + 1)
+          }
+        }
       }
 
       // send to subscribers
@@ -1535,27 +1553,38 @@ async function refreshData() {
   for (let i = 0; i < bulletin_list.length; i++) {
     const bulletin = bulletin_list[i]
     if (bulletin.sequence != 1) {
-      await prisma.Bulletin.update({
-        where: {
-          hash: bulletin.pre_hash
-        },
-        data: {
-          next_hash: bulletin.hash
-        }
-      })
+      try {
+        await prisma.Bulletin.update({
+          where: {
+            hash: bulletin.pre_hash
+          },
+          data: {
+            next_hash: bulletin.hash
+          }
+        })
+      } catch (e) {
+        // console.log(e)
+      }
     }
   }
 
   // link bulletin tag quote file
   bulletin_list.forEach(async bulletin => {
     let bulletin_json = JSON.parse(bulletin.json)
+    const bulletin_address = rippleKeyPairs.deriveAddress(bulletin_json.PublicKey)
 
-    if (bulletin_json.Tag) {
+    if (bulletin_json.Tag && Array.isArray(bulletin_json.Tag) && bulletin_json.Tag.length > 0) {
       await BindBulletinTag(bulletin.hash, bulletin_json.Tag)
     }
 
     if (bulletin_json.File) {
-      await BindBulletinFile(bulletin.hash, bulletin_json.File)
+      const files_to_fetch = await BindBulletinFile(bulletin.hash, bulletin_json.File)
+      for (let i = 0; i < files_to_fetch.length; i++) {
+        const file = files_to_fetch[i]
+        if (!file.is_saved) {
+          fetchBulletinFile(bulletin_address, bulletin_address, file.hash, file.chunk_cursor + 1)
+        }
+      }
     }
 
     if (bulletin_json.Quote) {
