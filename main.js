@@ -19,6 +19,11 @@ let SelfPrivateKey
 let NodeList = []
 let WhiteList = []
 
+function isAddressAllowed(address) {
+  if (!WhiteList || WhiteList.length === 0) return true
+  return WhiteList.includes(address)
+}
+
 // client server daemon
 let ServerDaemon = null
 // client and node connection
@@ -60,6 +65,13 @@ function fetchNodeConnURL(ws) {
     }
   }
   return null
+}
+
+function broadcastBulletinToNodes(bulletin) {
+  const jsonStr = JSON.stringify(bulletin)
+  for (const url in NodeConns) {
+    SendToNode(url, jsonStr)
+  }
 }
 
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -486,10 +498,15 @@ async function BindBulletinFile(bulletin_hash, files) {
 }
 
 // bulletin
-async function CacheBulletin(from, bulletin) {
+async function CacheBulletin(from, bulletin, isFromNode) {
   let timestamp = Date.now()
   let hash = QuarterSHA512Message(bulletin)
   let bulletin_address = rippleKeyPairs.deriveAddress(bulletin.PublicKey)
+
+  if (isFromNode && !isAddressAllowed(bulletin_address)) {
+    ConsoleDebug(`[Node Sync Filter] Dropped bulletin from non-whitelisted address: ${bulletin_address}`)
+    return
+  }
 
   let b = await prisma.Bulletin.findFirst({
     where: {
@@ -573,10 +590,9 @@ async function CacheBulletin(from, bulletin) {
       }
 
       //Brocdcast to NodeList
-      // for (let i in NodeList) {
-      //   let msg = GenObjectResponse(bulletin, NodeList[i].Address, SelfPublicKey, SelfPrivateKey)
-      //   SendMessage(NodeList[i].Address, msg)
-      // }
+      if (isAddressAllowed(bulletin_address)) {
+        broadcastBulletinToNodes(bulletin)
+      }
     }
   }
 }
@@ -903,7 +919,7 @@ function SendMessage(address, message) {
 }
 
 // handle Object
-async function handleObject(from, message, json) {
+async function handleObject(from, message, json, isFromNode) {
   if (json.To != null) {
     // forward message
     SendMessage(json.To, message)
@@ -912,7 +928,7 @@ async function handleObject(from, message, json) {
   switch (json.ObjectType) {
     case ObjectType.Bulletin:
       if (VerifyJsonSignature(json)) {
-        CacheBulletin(from, json)
+        CacheBulletin(from, json, isFromNode)
         //fetch more bulletin
         let address = rippleKeyPairs.deriveAddress(json.PublicKey)
         let next_bulletin = await prisma.Bulletin.findFirst({
@@ -932,6 +948,10 @@ async function handleObject(from, message, json) {
       // Node Interaction
       // pull step 2: fetch account latest bulletin
       let items = json.List
+      if (WhiteList.length > 0) {
+        items = items.filter(item => isAddressAllowed(item.Address))
+      }
+
       for (let i = 0; i < items.length; i++) {
         await DelayExec(1000)
         const item = items[i]
@@ -1064,7 +1084,10 @@ async function handleAction(from, message, json) {
   } else if (json.Action === ActionCode.BulletinSubscribe) {
     HandelBulletinSubscribe(json, from)
   } else if (json.Action === ActionCode.ServerAddressRequest && json.Page > 0) {
+    let where = WhiteList.length > 0 ? { address: { in: WhiteList } } : {}
+
     let result = await prisma.Bulletin.groupBy({
+      where,
       by: "address",
       _count: {
         address: true,
@@ -1289,7 +1312,7 @@ async function SyncClientRequest(address) {
   HandelGroupSync(address)
 }
 
-async function checkMessage(ws, message) {
+async function checkMessage(ws, message, isFromNode = false) {
   ConsoleInfo(`###################LOG################### Client Message:`)
   ConsoleInfo(`${message}`)
   // ConsoleInfo(`${message.slice(0, 512)}`)
@@ -1300,7 +1323,7 @@ async function checkMessage(ws, message) {
     teminateConn(ws)
   } else if (json.ObjectType) {
     let connAddress = fetchConnAddress(ws)
-    handleObject(connAddress, message, json)
+    handleObject(connAddress, message, json, isFromNode)
   } else if (json.Action) {
     let address = rippleKeyPairs.deriveAddress(json.PublicKey)
     if (Conns[address] === ws) {
@@ -1429,7 +1452,10 @@ function pullBulletin(url) {
 }
 
 async function pushBulletin(url) {
+  let where = WhiteList.length > 0 ? { address: { in: WhiteList } } : {}
+
   let bulletin_list = await prisma.Bulletin.findMany({
+    where,
     select: {
       address: true,
       sequence: true
@@ -1489,7 +1515,7 @@ function connectNode(node) {
       }
     } else {
       let message = data.toString()
-      checkMessage(ws, message)
+      checkMessage(ws, message, true)
     }
   })
 
@@ -1656,7 +1682,7 @@ function startServerDaemon() {
           }
         } else {
           let message = data.toString()
-          checkMessage(ws, message)
+          checkMessage(ws, message, false)
         }
       })
 
@@ -1688,13 +1714,6 @@ function main() {
   refreshData()
   startServerDaemon()
 
-  function isAddressAllowed(address) {
-    if (!WhiteList || WhiteList.length === 0) {
-      return true
-    }
-    return WhiteList.includes(address)
-  }
-
   // >>>>>>>>>>>>>>>>
   // Node Interaction
   try {
@@ -1720,7 +1739,7 @@ function main() {
       jobNodeConn = setInterval(keepNodeConn, 5000)
     }
     if (jobNodeSync === null) {
-      jobNodeSync = setInterval(keepNodeSync, 60 * 60 * 1000)
+      jobNodeSync = setInterval(keepNodeSync, 5 * 60 * 1000)
     }
   } catch (error) {
   }
