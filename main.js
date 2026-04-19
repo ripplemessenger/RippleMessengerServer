@@ -508,15 +508,13 @@ async function CacheBulletin(from, bulletin, isFromNode) {
     return
   }
 
-  let b = await prisma.Bulletin.findFirst({
-    where: {
-      address: bulletin_address,
-      sequence: bulletin.Sequence
-    }
-  })
-  if (b === null) {
-    let result = await prisma.Bulletin.create({
-      data: {
+  try {
+    const result = await prisma.Bulletin.upsert({
+      where: {
+        hash: hash,
+      },
+      update: {},
+      create: {
         hash: hash,
         pre_hash: bulletin.PreHash,
         address: bulletin_address,
@@ -527,21 +525,20 @@ async function CacheBulletin(from, bulletin, isFromNode) {
         created_at: timestamp
       }
     })
-    if (result) {
+
+    // 如果是新创建的，才执行后续绑定操作
+    const isNewRecord = result.created_at === timestamp
+
+    if (isNewRecord) {
+      ConsoleDebug(`[CacheBulletin] New bulletin saved: ${hash}`)
+
       if (result.sequence !== 1) {
         try {
-          //update pre_bulletin's next_hash
-          result = await prisma.Bulletin.update({
-            where: {
-              hash: bulletin.PreHash
-            },
-            data: {
-              next_hash: hash
-            }
+          await prisma.Bulletin.update({
+            where: { hash: bulletin.PreHash },
+            data: { next_hash: hash }
           })
-        } catch (error) {
-          console.log(error)
-        }
+        } catch (e) { }
       }
 
       // create tag
@@ -551,15 +548,12 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 
       // create quote
       if (bulletin.Quote) {
-        bulletin.Quote.forEach(async quote => {
-          result = await prisma.Reply.findFirst({
-            where: {
-              post_hash: quote.Hash,
-              reply_hash: hash
-            }
+        for (const quote of bulletin.Quote) {
+          const exist = await prisma.Reply.findFirst({
+            where: { post_hash: quote.Hash, reply_hash: hash }
           })
-          if (!result) {
-            result = await prisma.Reply.create({
+          if (!exist) {
+            await prisma.Reply.create({
               data: {
                 post_hash: quote.Hash,
                 reply_hash: hash,
@@ -567,14 +561,13 @@ async function CacheBulletin(from, bulletin, isFromNode) {
               }
             })
           }
-        })
+        }
       }
 
       // create file
-      if (bulletin.File) {
+      if (bulletin.File && Array.isArray(bulletin.File) && bulletin.File.length > 0) {
         let files_to_fetch = await BindBulletinFile(hash, bulletin.File)
-        for (let i = 0; i < files_to_fetch.length; i++) {
-          const file = files_to_fetch[i]
+        for (const file of files_to_fetch) {
           if (!file.is_saved) {
             fetchBulletinFile(from, bulletin_address, file.hash, file.chunk_cursor + 1)
           }
@@ -583,16 +576,21 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 
       // send to subscribers
       if (SubscribeMap[from] && SubscribeMap[from].length > 0) {
-        for (let i = 0; i < SubscribeMap[from].length; i++) {
-          const subscriber = SubscribeMap[from][i]
+        for (const subscriber of SubscribeMap[from]) {
           SendMessage(subscriber, JSON.stringify(bulletin))
         }
       }
 
-      //Brocdcast to NodeList
       if (isAddressAllowed(bulletin_address)) {
         broadcastBulletinToNodes(bulletin)
       }
+    }
+
+  } catch (error) {
+    if (error.code === 'P2002') {
+      ConsoleDebug(`[CacheBulletin] Duplicate bulletin ignored (already exists): ${hash}`)
+    } else {
+      ConsoleError(`[CacheBulletin] Error saving bulletin ${hash}: ${error.message}`)
     }
   }
 }
@@ -1436,6 +1434,7 @@ async function downloadBulletinFile(url) {
     //   ]
     // }
   })
+
   if (file_list && file_list.length > 0) {
     for (let i = 0; i < file_list.length; i++) {
       const file = file_list[i]
