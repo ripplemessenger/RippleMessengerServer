@@ -1491,7 +1491,6 @@ function connectNode(node) {
     ConsoleWarn(`connected <===> ${node.URL}`)
     ws.send(GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL))
     NodeConns[node.URL] = ws
-    console.log(Conns)
     SyncNodeData(node.URL)
   })
 
