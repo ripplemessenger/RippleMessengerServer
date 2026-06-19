@@ -134,10 +134,10 @@ function SignJson(json, sk) {
 
 function VerifyJsonSignature(json) {
   const sig = json.Signature
-  delete json.Signature
-  const json_hash = QuarterSHA512Message(json)
+  const verifyCopy = { ...json }
+  delete verifyCopy.Signature
+  const json_hash = QuarterSHA512Message(verifyCopy)
   if (rippleKeyPairs.verify(json_hash, sig, json.PublicKey)) {
-    json.Signature = sig
     return true
   } else {
     ConsoleWarn('json signature invalid...')

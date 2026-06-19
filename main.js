@@ -50,21 +50,11 @@ process.on("uncaughtException", function (err) {
 // }
 
 function fetchConnAddress(ws) {
-  for (let address in Conns) {
-    if (Conns[address] === ws) {
-      return address
-    }
-  }
-  return null
+  return ws._connAddress !== undefined ? ws._connAddress : null
 }
-
 function fetchNodeConnURL(ws) {
-  for (let url in NodeConns) {
-    if (NodeConns[url] === ws) {
-      return url
-    }
-  }
-  return null
+
+  return ws._nodeUrl !== undefined ? ws._nodeUrl : null
 }
 
 function broadcastBulletinToNodes(bulletin) {
@@ -1276,9 +1266,9 @@ async function SyncClientRequest(address) {
       // }
     }
   })
-  file_list.forEach(async file => {
+  for (const file of file_list) {
     fetchBulletinFile(address, address, file.hash, file.chunk_cursor + 1)
-  })
+  }
 
   // ecdh
   let dh = await prisma.ECDH.findFirst({
@@ -1358,6 +1348,7 @@ async function checkMessage(ws, message, isFromNode = false) {
 
           // new connection and new address
           ConsoleWarn(`connected <===> client : <${address}>`)
+          ws._connAddress = address
           Conns[address] = ws
           if (json.URL != null && CheckServerURL(json.URL)) {
             // Server Conntion
@@ -1376,6 +1367,7 @@ async function checkMessage(ws, message, isFromNode = false) {
           // new connection kick old conection with same address
           // sendServerMessage(Conns[address], MessageCode.NewConnectionOpening)
           Conns[address].close()
+          ws._connAddress = address
           Conns[address] = ws
         } else {
           ws.send("WTF...")
@@ -1413,7 +1405,7 @@ function fetchFileFromNode(url, address, hash, chunk_cursor) {
 }
 
 async function downloadBulletinFile(url) {
-  let address = fetchConnAddress(NodeConns[url])
+  let address = fetchNodeConnURL(NodeConns[url])
   if (address === null) {
     return
   }
@@ -1490,6 +1482,7 @@ function connectNode(node) {
   ws.on('open', function open() {
     ConsoleWarn(`connected <===> ${node.URL}`)
     ws.send(GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL))
+    ws._nodeUrl = node.URL
     NodeConns[node.URL] = ws
     SyncNodeData(node.URL)
   })
@@ -1606,7 +1599,7 @@ async function refreshData() {
   }
 
   // link bulletin tag quote file
-  bulletin_list.forEach(async bulletin => {
+  for (const bulletin of bulletin_list) {
     let bulletin_json = JSON.parse(bulletin.json)
     const bulletin_address = rippleKeyPairs.deriveAddress(bulletin_json.PublicKey)
 
@@ -1626,7 +1619,7 @@ async function refreshData() {
 
     if (bulletin_json.Quote) {
       if (bulletin_json.Quote.length != 0) {
-        bulletin_json.Quote.forEach(async quote => {
+        for (const quote of bulletin_json.Quote) {
           let result = await prisma.Reply.findFirst({
             where: {
               post_hash: quote.Hash,
@@ -1645,10 +1638,10 @@ async function refreshData() {
               console.log(`linking`, quote)
             }
           }
-        })
+        }
       }
     }
-  })
+  }
 }
 
 function startServerDaemon() {
