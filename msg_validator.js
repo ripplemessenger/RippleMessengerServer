@@ -1,403 +1,131 @@
 import Ajv from 'ajv'
-import { DeclareSchema, BulletinSchema, RandomBulletinRequestSchema, BulletinRequestSchema, ReplyBulletinRequestSchema, ECDHHandshakeSchema, PrivateMessageSchema, PrivateMessageSyncSchema, FileRequestSchema, AvatarRequestSchema, GroupMessageSyncSchema, AvatarListSchema, GroupListSchema, GroupSyncSchema, GroupMessageListSchema, BulletinSubscribeSchema, ReplyBulletinListSchema, TagBulletinListSchema, TagBulletinRequestSchema, ServerAddressListSchema, ServerAddressRequestSchema } from './msg_schema.js'
-import { ConsoleWarn } from './util.js'
+import { DeclareSchema, BulletinSchema, RandomBulletinRequestSchema, RandomBulletinListSchema, BulletinRequestSchema, ReplyBulletinRequestSchema, ECDHHandshakeSchema, PrivateMessageSchema, PrivateMessageSyncSchema, FileRequestSchema, AvatarRequestSchema, GroupMessageSyncSchema, AvatarListSchema, GroupListSchema, GroupSyncSchema, GroupMessageListSchema, BulletinSubscribeSchema, ReplyBulletinListSchema, TagBulletinListSchema, TagBulletinRequestSchema, ServerAddressListSchema, ServerAddressRequestSchema, GroupCreateSchema, GroupDeleteSchema, GroupMessageSchema } from './msg_schema.js'
+import { ConsoleWarn, ConsoleError } from './util.js'
 import { ActionCode, ObjectType } from './msg_const.js'
 
 const ajv = new Ajv({ allErrors: true })
 
-const vDeclareSchema = ajv.compile(DeclareSchema)
-function checkDeclareSchema(json) {
+// --- Pre-compiled validators ---
+const vDeclare              = ajv.compile(DeclareSchema)
+const vBulletin             = ajv.compile(BulletinSchema)
+const vBulletinRequest      = ajv.compile(BulletinRequestSchema)
+const vBulletinSubscribe    = ajv.compile(BulletinSubscribeSchema)
+const vECDHHandshake        = ajv.compile(ECDHHandshakeSchema)
+const vPrivateMessage       = ajv.compile(PrivateMessageSchema)
+const vPrivateMessageSync   = ajv.compile(PrivateMessageSyncSchema)
+const vFileRequest          = ajv.compile(FileRequestSchema)
+const vAvatarRequest        = ajv.compile(AvatarRequestSchema)
+const vGroupMessageSync     = ajv.compile(GroupMessageSyncSchema)
+const vAvatarList           = ajv.compile(AvatarListSchema)
+const vGroupList            = ajv.compile(GroupListSchema)
+const vGroupSync            = ajv.compile(GroupSyncSchema)
+const vGroupMessageList     = ajv.compile(GroupMessageListSchema)
+const vReplyBulletinRequest = ajv.compile(ReplyBulletinRequestSchema)
+const vReplyBulletinList    = ajv.compile(ReplyBulletinListSchema)
+const vTagBulletinList      = ajv.compile(TagBulletinListSchema)
+const vTagBulletinRequest   = ajv.compile(TagBulletinRequestSchema)
+const vServerAddressList    = ajv.compile(ServerAddressListSchema)
+const vServerAddressRequest = ajv.compile(ServerAddressRequestSchema)
+const vRandomBulletinRequest= ajv.compile(RandomBulletinRequestSchema)
+const vRandomBulletinList   = ajv.compile(RandomBulletinListSchema)
+const vGroupCreate          = ajv.compile(GroupCreateSchema)
+const vGroupDelete          = ajv.compile(GroupDeleteSchema)
+const vGroupMessage         = ajv.compile(GroupMessageSchema)
+
+// --- Generic schema checker (extracts 18-line pattern into 6 lines) ---
+function checkSchema(validate, name, json) {
   try {
-    if (vDeclareSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`DeclareSchema invalid...`)
-      console.log(json)
+    if (!validate(json)) {
+      ConsoleWarn(`${name} invalid`)
       return false
     }
-  } catch (e) {
-    return false
-  }
-}
-const vFileRequestSchema = ajv.compile(FileRequestSchema)
-function checkFileRequestSchema(json) {
-  try {
-    if (vFileRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`FileRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
+    return json
+  } catch (error) {
+    ConsoleError(`${name} check failed: ${error.message}`)
     return false
   }
 }
 
-// Avatar
-const vAvatarRequestSchema = ajv.compile(AvatarRequestSchema)
-function checkAvatarRequestSchema(json) {
-  try {
-    if (vAvatarRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`AvatarRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vAvatarListSchema = ajv.compile(AvatarListSchema)
-function checkAvatarListSchema(json) {
-  try {
-    if (vAvatarListSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`AvatarListSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-// Bulletin
-const vBulletinSchema = ajv.compile(BulletinSchema)
-function checkBulletinSchema(json) {
-  try {
-    if (vBulletinSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`BulletinSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vBulletinSubscribeSchema = ajv.compile(BulletinSubscribeSchema)
-function checkBulletinSubscribeSchema(json) {
-  try {
-    if (vBulletinSubscribeSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`BulletinSubscribeSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vBulletinRequestSchema = ajv.compile(BulletinRequestSchema)
-function checkBulletinRequestSchema(json) {
-  try {
-    if (vBulletinRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`BulletinRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vServerAddressRequestSchema = ajv.compile(ServerAddressRequestSchema)
-function checkServerAddressRequestSchema(json) {
-  try {
-    if (vServerAddressRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`ServerAddressRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-const vServerAddressListSchema = ajv.compile(ServerAddressListSchema)
-function checkServerAddressListSchema(json) {
-  try {
-    if (vServerAddressListSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`ServerAddressListSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vReplyBulletinRequestSchema = ajv.compile(ReplyBulletinRequestSchema)
-function checkReplyBulletinRequestSchema(json) {
-  try {
-    if (vReplyBulletinRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`ReplyBulletinRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-const vReplyBulletinListSchema = ajv.compile(ReplyBulletinListSchema)
-function checkReplyBulletinListSchema(json) {
-  try {
-    if (vReplyBulletinListSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`ReplyBulletinListSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vTagBulletinRequestSchema = ajv.compile(TagBulletinRequestSchema)
-function checkTagBulletinRequestSchema(json) {
-  try {
-    if (vTagBulletinRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`TagBulletinRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-const vTagBulletinListSchema = ajv.compile(TagBulletinListSchema)
-function checkTagBulletinListSchema(json) {
-  try {
-    if (vTagBulletinListSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`TagBulletinListSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vRandomBulletinRequestSchema = ajv.compile(RandomBulletinRequestSchema)
-function checkRandomBulletinRequestSchema(json) {
-  try {
-    if (vRandomBulletinRequestSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`RandomBulletinRequestSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-// Chat Handshake
-const vECDHHandshakeSchema = ajv.compile(ECDHHandshakeSchema)
-function checkECDHHandshakeSchema(json) {
-  try {
-    if (vECDHHandshakeSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`ECDHHandshakeSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-// Private
-const vPrivateMessageSchema = ajv.compile(PrivateMessageSchema)
-function checkPrivateMessageSchema(json) {
-  try {
-    if (vPrivateMessageSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`PrivateMessageSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vPrivateMessageSyncSchema = ajv.compile(PrivateMessageSyncSchema)
-function checkPrivateMessageSyncSchema(json) {
-  try {
-    if (vPrivateMessageSyncSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`PrivateMessageSyncSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-// Group
-const vGroupSyncSchema = ajv.compile(GroupSyncSchema)
-function checkGroupSyncSchema(json) {
-  try {
-    if (vGroupSyncSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`GroupSyncSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-
-const vGroupListSchema = ajv.compile(GroupListSchema)
-function checkGroupListSchema(json) {
-  try {
-    if (vGroupListSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`GroupListSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-const vGroupMessageSyncSchema = ajv.compile(GroupMessageSyncSchema)
-function checkGroupMessageSyncSchema(json) {
-  try {
-    if (vGroupMessageSyncSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`GroupMessageSyncSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
-const vGroupMessageListSchema = ajv.compile(GroupMessageListSchema)
-function checkGroupMessageListSchema(json) {
-  try {
-    if (vGroupMessageListSchema(json)) {
-      return json
-    } else {
-      ConsoleWarn(`GroupMessageListSchema invalid...`)
-      console.log(json)
-      return false
-    }
-  } catch (e) {
-    return false
-  }
-}
+// --- Shorthand wrappers ---
+const chkDeclare               = (j) => checkSchema(vDeclare,               'Declare', j)
+const chkBulletin              = (j) => checkSchema(vBulletin,              'Bulletin', j)
+const chkBulletinRequest       = (j) => checkSchema(vBulletinRequest,       'BulletinRequest', j)
+const chkBulletinSubscribe     = (j) => checkSchema(vBulletinSubscribe,     'BulletinSubscribe', j)
+const chkECDHHandshake         = (j) => checkSchema(vECDHHandshake,         'ECDHHandshake', j)
+const chkPrivateMessage        = (j) => checkSchema(vPrivateMessage,        'PrivateMessage', j)
+const chkPrivateMessageSync    = (j) => checkSchema(vPrivateMessageSync,    'PrivateMessageSync', j)
+const chkFileRequest           = (j) => checkSchema(vFileRequest,           'FileRequest', j)
+const chkAvatarRequest         = (j) => checkSchema(vAvatarRequest,         'AvatarRequest', j)
+const chkGroupMessageSync      = (j) => checkSchema(vGroupMessageSync,      'GroupMessageSync', j)
+const chkAvatarList            = (j) => checkSchema(vAvatarList,            'AvatarList', j)
+const chkGroupList             = (j) => checkSchema(vGroupList,             'GroupList', j)
+const chkGroupSync             = (j) => checkSchema(vGroupSync,             'GroupSync', j)
+const chkGroupMessageList      = (j) => checkSchema(vGroupMessageList,      'GroupMessageList', j)
+const chkReplyBulletinRequest  = (j) => checkSchema(vReplyBulletinRequest,  'ReplyBulletinRequest', j)
+const chkReplyBulletinList     = (j) => checkSchema(vReplyBulletinList,     'ReplyBulletinList', j)
+const chkTagBulletinList       = (j) => checkSchema(vTagBulletinList,       'TagBulletinList', j)
+const chkTagBulletinRequest    = (j) => checkSchema(vTagBulletinRequest,    'TagBulletinRequest', j)
+const chkServerAddressList     = (j) => checkSchema(vServerAddressList,     'ServerAddressList', j)
+const chkServerAddressRequest  = (j) => checkSchema(vServerAddressRequest,  'ServerAddressRequest', j)
+const chkRandomBulletinRequest = (j) => checkSchema(vRandomBulletinRequest, 'RandomBulletinRequest', j)
+const chkRandomBulletinList    = (j) => checkSchema(vRandomBulletinList,    'RandomBulletinList', j)
+const chkGroupCreate           = (j) => checkSchema(vGroupCreate,           'GroupCreate', j)
+const chkGroupDelete           = (j) => checkSchema(vGroupDelete,           'GroupDelete', j)
+const chkGroupMessage          = (j) => checkSchema(vGroupMessage,          'GroupMessage', j)
 
 function deriveJson(str) {
   try {
-    let json = JSON.parse(str)
-    return json
+    return JSON.parse(str)
   } catch (e) {
-    console.log(`not a json...`)
+    ConsoleWarn('not a valid json')
     return false
   }
 }
 
 function MsgValidate(strJson) {
   const json = deriveJson(strJson)
-  if (json) {
-    if (json.Action) {
-      switch (json.Action) {
-        case ActionCode.Declare:
-          return checkDeclareSchema(json)
-        case ActionCode.FileRequest:
-          return checkFileRequestSchema(json)
-        case ActionCode.AvatarRequest:
-          return checkAvatarRequestSchema(json)
-        case ActionCode.BulletinRequest:
-          return checkBulletinRequestSchema(json)
-        case ActionCode.BulletinSubscribe:
-          return checkBulletinSubscribeSchema(json)
-        case ActionCode.ServerAddressRequest:
-          return checkServerAddressRequestSchema(json)
-        case ActionCode.ReplyBulletinRequest:
-          return checkReplyBulletinRequestSchema(json)
-        case ActionCode.TagBulletinRequest:
-          return checkTagBulletinRequestSchema(json)
-        case ActionCode.RandomBulletinRequest:
-          return checkRandomBulletinRequestSchema(json)
-        case ActionCode.PrivateMessageSync:
-          return checkPrivateMessageSyncSchema(json)
-        case ActionCode.GroupSync:
-          return checkGroupSyncSchema(json)
-        case ActionCode.GroupMessageSync:
-          return checkGroupMessageSyncSchema(json)
-        default:
-          ConsoleWarn(`json schema invalid...`)
-          console.log(json)
-          return false
-      }
-    } else if (json.ObjectType) {
-      switch (json.ObjectType) {
-        case ObjectType.AvatarList:
-          return checkAvatarListSchema(json)
-        case ObjectType.Bulletin:
-          return checkBulletinSchema(json)
-        case ObjectType.ServerAddressList:
-          return checkServerAddressListSchema(json)
-        case ObjectType.ReplyBulletinList:
-          return checkReplyBulletinListSchema(json)
-        case ObjectType.TagBulletinList:
-          return checkTagBulletinListSchema(json)
-        case ObjectType.RandomBulletinList:
-          return checkRandomBulletinRequestSchema(json)
-        case ObjectType.ECDH:
-          return checkECDHHandshakeSchema(json)
-        case ObjectType.PrivateMessage:
-          return checkPrivateMessageSchema(json)
-        case ObjectType.GroupList:
-          return checkGroupListSchema(json)
-        case ObjectType.GroupMessageList:
-          return checkGroupMessageListSchema(json)
-        default:
-          ConsoleWarn(`json schema invalid...`)
-          console.log(json)
-          return false
-      }
-    } else {
-      return false
+  if (!json) return false
+
+  if (json.Action) {
+    switch (json.Action) {
+      case ActionCode.Declare:               return chkDeclare(json)
+      case ActionCode.FileRequest:           return chkFileRequest(json)
+      case ActionCode.AvatarRequest:         return chkAvatarRequest(json)
+      case ActionCode.BulletinRequest:       return chkBulletinRequest(json)
+      case ActionCode.BulletinSubscribe:     return chkBulletinSubscribe(json)
+      case ActionCode.ServerAddressRequest:  return chkServerAddressRequest(json)
+      case ActionCode.ReplyBulletinRequest:  return chkReplyBulletinRequest(json)
+      case ActionCode.TagBulletinRequest:    return chkTagBulletinRequest(json)
+      case ActionCode.RandomBulletinRequest: return chkRandomBulletinRequest(json)
+      case ActionCode.PrivateMessageSync:    return chkPrivateMessageSync(json)
+      case ActionCode.GroupSync:             return chkGroupSync(json)
+      case ActionCode.GroupMessageSync:      return chkGroupMessageSync(json)
+      default:
+        ConsoleWarn('unknown Action code')
+        return false
     }
-  } else {
-    return false
+  } else if (json.ObjectType) {
+    switch (json.ObjectType) {
+      case ObjectType.AvatarList:            return chkAvatarList(json)
+      case ObjectType.Bulletin:              return chkBulletin(json)
+      case ObjectType.ServerAddressList:     return chkServerAddressList(json)
+      case ObjectType.ReplyBulletinList:     return chkReplyBulletinList(json)
+      case ObjectType.TagBulletinList:       return chkTagBulletinList(json)
+      case ObjectType.RandomBulletinList:    return chkRandomBulletinList(json)
+      case ObjectType.ECDH:                  return chkECDHHandshake(json)
+      case ObjectType.PrivateMessage:        return chkPrivateMessage(json)
+      case ObjectType.GroupCreate:           return chkGroupCreate(json)
+      case ObjectType.GroupDelete:           return chkGroupDelete(json)
+      case ObjectType.GroupList:             return chkGroupList(json)
+      case ObjectType.GroupMessage:          return chkGroupMessage(json)
+      case ObjectType.GroupMessageList:      return chkGroupMessageList(json)
+      default:
+        ConsoleWarn('unknown ObjectType')
+        return false
+    }
   }
+
+  return false
 }
 
-export {
-  MsgValidate
-}
+export { MsgValidate }

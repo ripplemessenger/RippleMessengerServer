@@ -109,11 +109,12 @@ function GenRandomBulletinList(bulletin_list) {
 }
 
 // ***Private***
-function GenPrivateMessageSync(pair_address, current_sequence, pk, sk) {
+function GenPrivateMessageSync(pair_address, self_sequence, pair_sequence, pk, sk) {
   let json = {
-    Action: ActionCode.ChatMessageSyncFromServer,
-    PairAddress: pair_address,
-    CurrentSequence: current_sequence,
+    Action: ActionCode.PrivateMessageSync,
+    To: pair_address,
+    SelfSequence: self_sequence,
+    PairSequence: pair_sequence,
     Timestamp: Date.now(),
     PublicKey: pk,
   }

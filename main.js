@@ -1,4 +1,5 @@
 import fs from 'fs'
+import fsp from 'fs/promises'
 import path from 'path'
 import { WebSocket, WebSocketServer } from 'ws'
 import rippleKeyPairs from "ripple-keypairs"
@@ -7,54 +8,98 @@ const prisma = new PrismaClient()
 
 import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
 import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
-import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize } from './const.js'
+import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize, FILE_REQUEST_TTL_MS, AVATAR_UPDATE_THROTTLE_MS, DECLARE_TIMESTAMP_TOLERANCE_MS, NODE_RECONNECT_INTERVAL_MS, NODE_SYNC_INTERVAL_MS, FILE_PURGE_INTERVAL_MS } from './const.js'
 import { GenDeclare, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList, GenServerAddressListRequest, GenServerAddressList, GenBulletinRequestByHash } from './msg_generator.js'
 import { MsgValidate } from './msg_validator.js'
 
+/*
+ * TODO: Module splitting for maintainability
+ *
+ * Current file is ~1800 lines. Recommended split:
+ * - connection.js   — WebSocket lifecycle, terminateConn, SendMessage/broadcast
+ * - fileHandler.js  — binary frames, fileRequest cache, saveBufferFile
+ * - cache/avatar.js — CacheAvatar, HandleAvatarRequest
+ * - cache/bulletin.js — CacheBulletin, BindBulletin*, pushBulletin, refreshData
+ * - cache/group.js  — CacheGroup, HandleGroupSync, HandlePrivateMessageSync
+ * - router/objectHandler.js — handleObject (ObjectType switch)
+ * - router/actionHandler.js — handleAction (ActionCode switch)
+ * - network/nodeClient.js — node WebSocket management, keepNodeConn/Sync
+ * - bootstrap/server.js — config loading, intervals, gracefulShutdown
+ */
+
+/** Server identity & authentication — loaded from config at startup */
 let SelfURL = undefined
 let SelfAddress
 let SelfPublicKey
 let SelfPrivateKey
 
+/** Remote peer-node network: list of all nodes + whitelist of allowed addresses */
 let NodeList = []
 let WhiteList = []
 
 function isAddressAllowed(address) {
-  if (!WhiteList || WhiteList.length === 0) return true
+  if (WhiteList.length === 0) return true
   return WhiteList.includes(address)
 }
 
-// client server daemon
+/** Client-server daemon and active WebSocket connections keyed by address or URL */
 let ServerDaemon = null
-// client and node connection
-let Conns = {}
-// node conn
-let jobNodeConn = null
-let jobNodeSync = null
-let NodeConns = {}
+let Conns = {}       // client connections: address -> WebSocket
+let jobNodeConn = null    // interval timer for reconnecting dropped node links
+let jobNodeSync = null    // interval timer for periodic bulletin sync across nodes
+let jobFilePurge = null   // interval timer for purging expired file requests
+let NodeConns = {}        // node-to-node connections: URL -> WebSocket
 
-let FileRequestList = []
+/** Pending file-transfer requests queued while awaiting binary chunks */
+let fileRequestList = new Map()
 
-let GroupMap = {}
-let SubscribeMap = {}
+/** Group membership map (group_hash -> member list) and subscription map (address -> subscribed addresses) */
+let groupMap = {}
+let subscribeMap = {}
 
 // keep alive
 process.on("uncaughtException", function (err) {
+  ConsoleError("[uncaughtException] Server encountered a fatal error:")
   ConsoleError(err)
   ConsoleError(err.stack)
+  ConsoleError("[uncaughtException] Process state is now undefined - restart is recommended.")
 })
 
-// TODO: server msg
-// function sendServerMessage(ws, msgCode) {
-//   ws.send(strServerMessage(msgCode))
-// }
+process.on("unhandledRejection", function (reason, promise) {
+  ConsoleError("[unhandledRejection] Uncaught async error:")
+  ConsoleError(reason)
+  if (reason && reason.stack) {
+    ConsoleError(reason.stack)
+  }
+  ConsoleError("[unhandledRejection] Process state may be undefined - restart is recommended.")
+})
 
 function fetchConnAddress(ws) {
-  return ws._connAddress !== undefined ? ws._connAddress : null
+  return ws._connAddress ?? null
 }
 function fetchNodeConnURL(ws) {
 
-  return ws._nodeUrl !== undefined ? ws._nodeUrl : null
+  return ws._nodeUrl ?? null
+}
+
+/**
+ * Handles incoming binary WebSocket frames (file chunks).
+ * Extracts the 4-byte nonce, looks up the matching fileRequestList entry,
+ * and either forwards the raw data (private/group chat) or persists to disk.
+ * @param {Uint8Array} data - Raw binary frame containing nonce + file chunk data
+ */
+function handleBinaryMessage(data) {
+  const nonce = BufferToUint32(Uint8Array.prototype.slice.call(data, 0, 4))
+  const content = Uint8Array.prototype.slice.call(data, 4)
+  const request = fileRequestList.get(nonce)
+  if (!request) return
+  if (request.Type === FileRequestType.PrivateChatFile || request.Type === FileRequestType.GroupChatFile) {
+    // forward file data to the destination peer
+    removeFileRequestByNonce(request.Nonce)
+    SendMessage(request.From, data)
+  } else {
+    saveBufferFile(request, content)
+  }
 }
 
 function broadcastBulletinToNodes(bulletin) {
@@ -64,9 +109,13 @@ function broadcastBulletinToNodes(bulletin) {
   }
 }
 
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-//client listener
-function teminateConn(ws) {
+// === Client Connection Handler ===
+/**
+ * Terminates a WebSocket connection by closing it and removing from tracking maps.
+ * Checks both client connections (by address) and node connections (by URL).
+ * @param {WebSocket} ws - The WebSocket instance to terminate
+ */
+function terminateConn(ws) {
   ws.close()
   let connAddress = fetchConnAddress(ws)
   if (connAddress != null) {
@@ -76,98 +125,145 @@ function teminateConn(ws) {
 
   let url = fetchNodeConnURL(ws)
   if (url != null) {
-    ConsoleWarn(`###################LOG################### server disconnect... <${connAddress}>`)
+    ConsoleWarn(`###################LOG################### server disconnect... <${url}>`)
     delete NodeConns[url]
   }
 }
 
 // file
 function genFileNonce() {
-  let nonce = genNonce()
-  for (let i = 0; i < FileRequestList.length; i++) {
-    const r = FileRequestList[i];
-    if (r.Nonce === nonce) {
-      return genFileNonce()
-    }
-  }
+  let nonce
+  do {
+    nonce = genNonce()
+  } while (fileRequestList.has(nonce))
   return nonce
 }
 
-function fetchAvatarFile(from, address, hash) {
+/** Remove a file-transfer request from fileRequestList by its nonce. */
+function removeFileRequestByNonce(nonce) {
+  fileRequestList.delete(nonce)
+}
+
+/* NOTE: These three purge functions each iterate the full fileRequestList Map.
+ * purgeExpiredFileRequests is now called periodically via jobFilePurge (60s interval).
+ * The other two are on-demand and scoped by hash/address for targeted cleanup. */
+/**
+ * Purges expired file-transfer request entries from fileRequestList.
+ * Called periodically every 60 seconds via the jobFilePurge interval timer.
+ * @returns {void}
+ */
+function purgeExpiredFileRequests() {
+  const now = Date.now()
+  for (const [nonce, r] of fileRequestList) {
+    if (r.Timestamp + FILE_REQUEST_TTL_MS <= now) {
+      fileRequestList.delete(nonce)
+    }
+  }
+}
+
+function purgeFileRequestsByHashAddress(hash, address) {
+  for (const [nonce, r] of fileRequestList) {
+    if (r.Hash === hash && r.Address === address) {
+      fileRequestList.delete(nonce)
+    }
+  }
+}
+
+function purgeFileRequestsByHashFrom(hash, from) {
+  for (const [nonce, r] of fileRequestList) {
+    if (r.Hash === hash && r.From === from) {
+      fileRequestList.delete(nonce)
+    }
+  }
+}
+
+/**
+ * Generic file request: generates nonce, caches in fileRequestList, sends to client.
+ * @param {string} from - Recipient XRPL address
+ * @param {number} type - FileRequestType enum value
+ * @param {string} hash - SHA-512 content hash of the file
+ * @param {number} chunkCursor - Current chunk index (1-based)
+ * @param {string} address - XRPL address owning the file
+ * @param {boolean} doCleanup - If true, purge expired + duplicate entries before push
+ * @returns {void}
+ */
+function requestFile(from, type, hash, chunkCursor, address, doCleanup) {
   let nonce = genFileNonce()
   let tmp = {
-    Type: FileRequestType.Avatar,
+    Type: type,
     Nonce: nonce,
     Hash: hash,
     Address: address,
     Timestamp: Date.now()
   }
-  FileRequestList.push(tmp)
-  let msg = GenFileRequest(FileRequestType.Avatar, hash, nonce, 1, SelfPublicKey, SelfPrivateKey)
+  if (chunkCursor > 1) {
+    tmp.ChunkCursor = chunkCursor
+  }
+  if (doCleanup) {
+    purgeExpiredFileRequests()
+    purgeFileRequestsByHashAddress(hash, address)
+  }
+  fileRequestList.set(nonce, tmp)
+  let msg = GenFileRequest(type, hash, nonce, chunkCursor, SelfPublicKey, SelfPrivateKey)
   SendMessage(from, msg)
+}
+
+function fetchAvatarFile(from, address, hash) {
+  requestFile(from, FileRequestType.Avatar, hash, 1, address, false)
 }
 
 function fetchBulletinFile(from, address, hash, chunk_cursor) {
-  let nonce = genFileNonce()
+  requestFile(from, FileRequestType.File, hash, chunk_cursor, address, true)
+}
+
+/**
+ * Cache a file-transfer request in fileRequestList after purging expired and duplicate entries.
+ * @param {string} from - Source XRPL address of the sender
+ * @param {object} json - The incoming file request message object (contains Nonce, Hash, Timestamp)
+ * @param {number} type - FileRequestType enum value (PrivateChatFile or GroupChatFile)
+ * @returns {void}
+ */
+function cacheFileRequest(from, json, type) {
   let tmp = {
-    Type: FileRequestType.File,
-    Nonce: nonce,
-    Hash: hash,
-    ChunkCursor: chunk_cursor,
-    Address: address,
-    Timestamp: Date.now()
+    Type: type,
+    Nonce: json.Nonce,
+    From: from,
+    // To: json.To,
+    Hash: json.Hash,
+    // ChunkCursor: json.ChunkCursor,
+    Timestamp: json.Timestamp
   }
-  FileRequestList = FileRequestList.filter(r => r.Timestamp + 120 * 1000 > Date.now())
-  FileRequestList = FileRequestList.filter(r => !(r.Hash === hash && r.Address === address))
-  FileRequestList.push(tmp)
-  let msg = GenFileRequest(FileRequestType.File, hash, nonce, chunk_cursor, SelfPublicKey, SelfPrivateKey)
-  SendMessage(from, msg)
+  purgeExpiredFileRequests()
+  purgeFileRequestsByHashFrom(json.Hash, from)
+  fileRequestList.set(json.Nonce, tmp)
 }
 
 function cachePrivateFileRequest(from, json) {
-  let tmp = {
-    Type: FileRequestType.PrivateChatFile,
-    Nonce: json.Nonce,
-    From: from,
-    // To: json.To,
-    Hash: json.Hash,
-    // ChunkCursor: json.ChunkCursor,
-    Timestamp: json.Timestamp
-  }
-  FileRequestList = FileRequestList.filter(r => r.Timestamp + 120 * 1000 > Date.now())
-  FileRequestList = FileRequestList.filter(r => !(r.Hash === json.Hash && r.From === from))
-  FileRequestList.push(tmp)
+  cacheFileRequest(from, json, FileRequestType.PrivateChatFile)
 }
 
 function cacheGroupFileRequest(from, json) {
-  let tmp = {
-    Type: FileRequestType.GroupChatFile,
-    Nonce: json.Nonce,
-    From: from,
-    // To: json.To,
-    Hash: json.Hash,
-    // ChunkCursor: json.ChunkCursor,
-    Timestamp: json.Timestamp
-  }
-  FileRequestList = FileRequestList.filter(r => r.Timestamp + 120 * 1000 > Date.now())
-  FileRequestList = FileRequestList.filter(r => !(r.Hash === json.Hash && r.From === from))
-  FileRequestList.push(tmp)
+  cacheFileRequest(from, json, FileRequestType.GroupChatFile)
 }
 
+/**
+ * Persist incoming file buffer chunks to disk. Handles avatar files (full write)
+ * and bulletin attachments (chunked append with hash verification).
+ * @param {object} request - File request entry from fileRequestList (Type, Hash, Address, etc.)
+ * @param {Uint8Array} content - Raw file chunk data received via WebSocket binary frame
+ * @returns {Promise<void>}
+ */
 async function saveBufferFile(request, content) {
   switch (request.Type) {
     case FileRequestType.Avatar:
       const content_hash = FileBufferHash(content)
       if (request.Hash === content_hash) {
         let avatar_dir = `./${AvatarDir}/${request.Address.substring(1, 4)}/${request.Address.substring(4, 7)}`
-        fs.mkdirSync(path.resolve(avatar_dir), { recursive: true })
+        await fsp.mkdir(path.resolve(avatar_dir), { recursive: true })
         let avatar_path = `${avatar_dir}/${request.Address}.png`
-        fs.writeFile(avatar_path, content, async (err) => {
-          if (err) {
-            console.log(err.message)
-            return
-          }
-          FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
+        try {
+          await fsp.writeFile(avatar_path, content)
+          removeFileRequestByNonce(request.Nonce)
           await prisma.Avatar.update({
             where: {
               address: request.Address
@@ -176,12 +272,14 @@ async function saveBufferFile(request, content) {
               is_saved: true
             }
           })
-        })
+        } catch (err) {
+          ConsoleWarn(err.message)
+        }
       }
       break
     case FileRequestType.File:
       let file_dir = `./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}`
-      fs.mkdirSync(path.resolve(file_dir), { recursive: true })
+      await fsp.mkdir(path.resolve(file_dir), { recursive: true })
       let file_path = `${file_dir}/${request.Hash}`
       let file = await prisma.File.findFirst({
         where: {
@@ -199,7 +297,7 @@ async function saveBufferFile(request, content) {
       })
       if (file !== null) {
         if (file.chunk_cursor === file.chunk_length) {
-          fs.rmSync(path.resolve(file_path))
+          await fsp.rm(path.resolve(file_path), { force: true })
           await prisma.File.update({
             where: {
               hash: request.Hash
@@ -210,12 +308,9 @@ async function saveBufferFile(request, content) {
           })
           fetchBulletinFile(request.Address, request.Address, request.Hash, 1)
         } else if (file.chunk_cursor < file.chunk_length && file.chunk_cursor + 1 === request.ChunkCursor) {
-          fs.appendFile(file_path, content, async (err) => {
-            if (err) {
-              console.log(err.message)
-              return
-            }
-            FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
+          try {
+            await fsp.appendFile(file_path, Buffer.from(content))
+            removeFileRequestByNonce(request.Nonce)
             let current_chunk_cursor = file.chunk_cursor + 1
             await prisma.File.update({
               where: {
@@ -231,7 +326,7 @@ async function saveBufferFile(request, content) {
             } else {
               let hash = FileReadHash(path.resolve(file_path))
               if (hash !== request.Hash) {
-                fs.rmSync(path.resolve(file_path))
+                await fsp.rm(path.resolve(file_path), { force: true })
                 await prisma.File.update({
                   where: {
                     hash: request.Hash
@@ -252,7 +347,9 @@ async function saveBufferFile(request, content) {
                 })
               }
             }
-          })
+          } catch (err) {
+            ConsoleWarn(`Failed to append file chunk: ${err.message}`)
+          }
         }
       }
       break
@@ -261,7 +358,7 @@ async function saveBufferFile(request, content) {
   }
 }
 
-async function HandelFileRequest(request, from) {
+async function HandleFileRequest(request, from) {
   // send cache file
   switch (request.FileType) {
     case FileRequestType.Avatar:
@@ -273,8 +370,12 @@ async function HandelFileRequest(request, from) {
           address: true
         }
       })
+      if (avatar === null) {
+        ConsoleInfo(`[HandleFileRequest] Avatar not found for hash ${request.Hash}`)
+        return
+      }
       let avatar_file_path = path.resolve(`./${AvatarDir}/${avatar.address.substring(1, 4)}/${avatar.address.substring(4, 7)}/${avatar.address}.png`)
-      let buffer = fs.readFileSync(avatar_file_path)
+      let buffer = await fsp.readFile(avatar_file_path)
       const nonce = Uint32ToBuffer(request.Nonce)
       SendMessage(from, Buffer.concat([nonce, buffer]))
       break;
@@ -297,34 +398,23 @@ async function HandelFileRequest(request, from) {
         let file_left = file.size - start
         let length = Math.min(FileChunkSize, file_left)
         let file_path = path.resolve(`./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}/${request.Hash}`)
-        fs.open(file_path, 'r', async (err, fd) => {
-          if (err) return console.error(err)
-          const buffer = Buffer.alloc(length)
-          fs.read(fd, buffer, 0, length, start, (err, bytesRead, readBuffer) => {
-            if (err) {
-              console.error(err)
-              return
-            }
-            if (bytesRead > 0) {
-              const chunk = Uint8Array.prototype.slice.call(readBuffer, 0, bytesRead)
-              // const chunk = readBuffer.slice(0, bytesRead)
-              const nonce = Uint32ToBuffer(request.Nonce)
-              SendMessage(from, Buffer.concat([nonce, chunk]))
-            }
-            fs.close(fd, (err) => {
-              if (err) return console.error(err)
-            })
-          })
-        })
+        try {
+          const buffer = await fsp.readFile(file_path, null, { start, end: start + length - 1 })
+          const chunk = Uint8Array.from(buffer)
+          const nonce = Uint32ToBuffer(request.Nonce)
+          SendMessage(from, Buffer.concat([nonce, chunk]))
+        } catch (err) {
+          ConsoleError(err)
+        }
       }
       break
     case FileRequestType.PrivateChatFile:
-      // already forword, save relay info
+      // already forwarded, save relay info
       cachePrivateFileRequest(from, request)
       break
     case FileRequestType.GroupChatFile:
       cacheGroupFileRequest(from, request)
-      let members = GroupMap[request.GroupHash]
+      let members = groupMap[request.GroupHash]
       if (members) {
         let tmp_members = shuffleArray(members)
         for (let i = 0; i < tmp_members.length; i++) {
@@ -342,6 +432,14 @@ async function HandelFileRequest(request, from) {
 }
 
 // avatar
+/**
+ * Upsert an avatar record into the database. If the avatar timestamp is newer
+ * than what is stored (and throttle period has elapsed), update the record.
+ * Triggers a file fetch for the avatar image if hash is not the genesis hash.
+ * @param {string} from - Source XRPL address of the sender
+ * @param {object} avatar - Avatar object with PublicKey, Hash, Size, Timestamp fields
+ * @returns {Promise<void>}
+ */
 async function CacheAvatar(from, avatar) {
   let timestamp = Date.now()
   let avatar_address = rippleKeyPairs.deriveAddress(avatar.PublicKey)
@@ -366,14 +464,7 @@ async function CacheAvatar(from, avatar) {
       }
     })
 
-    // if (result) {
-    //   //Brocdcast to NodeList
-    //   for (let i in NodeList) {
-    //     let msg = GenObjectResponse(avatar, NodeList[i].Address, SelfPublicKey, SelfPrivateKey)
-    //     SendMessage(NodeList[i].Address, msg)
-    //   }
-    // }
-  } else if (avatar.Timestamp > db_a.signed_at && db_a.signed_at < timestamp - 60 * 1000 && avatar.Hash !== db_a.hash) {
+  } else if (avatar.Timestamp > db_a.signed_at && db_a.signed_at < timestamp - AVATAR_UPDATE_THROTTLE_MS && avatar.Hash !== db_a.hash) {
     let result = await prisma.Avatar.update({
       where: {
         address: avatar_address
@@ -391,25 +482,34 @@ async function CacheAvatar(from, avatar) {
   }
 }
 
-async function HandelAvatarReqeust(request, from) {
+/**
+ * Handle an avatar request from a client. Compares requested avatars against
+ * the local database: returns saved avatars the client is missing, and requests
+ * from the client any newer avatars the server does not have.
+ * @param {object} request - AvatarRequest message containing a List of {Address, SignedAt} objects
+ * @param {string} from - Source XRPL address of the requesting client
+ * @returns {Promise<void>}
+ */
+async function HandleAvatarRequest(request, from) {
   let new_list = []
   let old_list = []
+
+  const addresses = request.List.map(item => item.Address)
+  const db_avatars = await prisma.Avatar.findMany({
+    where: { address: { in: addresses } },
+    select: { is_saved: true, signed_at: true, json: true }
+  })
+  const avatarMap = new Map(db_avatars.map(a => [a.address, a]))
+
   for (let i = 0; i < request.List.length; i++) {
     const avatar = request.List[i]
-    let db_avatar = await prisma.Avatar.findFirst({
-      where: {
-        address: avatar.Address
-      },
-      select: {
-        is_saved: true,
-        signed_at: true,
-        json: true
-      }
-    })
+    let db_avatar = avatarMap.get(avatar.Address)
 
-    if (db_avatar !== null) {
+    if (db_avatar !== undefined) {
       if (db_avatar.signed_at > avatar.SignedAt && db_avatar.is_saved) {
-        new_list.push(JSON.parse(db_avatar.json))
+        let parsedAvatar
+        try { parsedAvatar = JSON.parse(db_avatar.json) } catch { parsedAvatar = null }
+        if (parsedAvatar) new_list.push(parsedAvatar)
       } else if (db_avatar.signed_at < avatar.SignedAt) {
         old_list.push({ Address: avatar.Address, SignedAt: Number(db_avatar.signed_at) })
       }
@@ -472,12 +572,15 @@ async function BindBulletinFile(bulletin_hash, files) {
       })
 
       fetchedFiles.push(fileRecord)
+    }
 
+    // Batch-connect all files to bulletin in a single update instead of per-file updates
+    if (fetchedFiles.length > 0) {
       await tx.Bulletin.update({
         where: { hash: bulletin_hash },
         data: {
           files: {
-            connect: { hash: f.Hash }
+            connect: fetchedFiles.map(f => ({ hash: f.hash }))
           }
         }
       })
@@ -488,6 +591,15 @@ async function BindBulletinFile(bulletin_hash, files) {
 }
 
 // bulletin
+/**
+ * Upsert a bulletin into the database with tag, quote (reply), and file bindings.
+ * For new records only: links chain pointers (pre_hash/next_hash), creates tags,
+ * creates quotes, fetches file chunks, notifies subscribers, and broadcasts to peer nodes.
+ * @param {string} from - Source XRPL address of the sender
+ * @param {object} bulletin - Bulletin object with PublicKey, PreHash, Sequence, Content, etc.
+ * @param {boolean} isFromNode - True if the bulletin arrived via node-to-node sync (whitelist check applies)
+ * @returns {Promise<void>}
+ */
 async function CacheBulletin(from, bulletin, isFromNode) {
   let timestamp = Date.now()
   let hash = QuarterSHA512Message(bulletin)
@@ -528,7 +640,9 @@ async function CacheBulletin(from, bulletin, isFromNode) {
             where: { hash: bulletin.PreHash },
             data: { next_hash: hash }
           })
-        } catch (e) { }
+        } catch (e) {
+          ConsoleDebug(`[CacheBulletin] Failed to update next_hash for PreHash ${bulletin.PreHash} -> ${hash}: ${e.message}`)
+        }
       }
 
       // create tag
@@ -537,21 +651,13 @@ async function CacheBulletin(from, bulletin, isFromNode) {
       }
 
       // create quote
-      if (bulletin.Quote) {
-        for (const quote of bulletin.Quote) {
-          const exist = await prisma.Reply.findFirst({
-            where: { post_hash: quote.Hash, reply_hash: hash }
-          })
-          if (!exist) {
-            await prisma.Reply.create({
-              data: {
-                post_hash: quote.Hash,
-                reply_hash: hash,
-                signed_at: bulletin.Timestamp
-              }
-            })
-          }
-        }
+      if (bulletin.Quote && bulletin.Quote.length > 0) {
+        const quoteData = bulletin.Quote.map(q => ({
+          post_hash: q.Hash,
+          reply_hash: hash,
+          signed_at: bulletin.Timestamp
+        }))
+        await prisma.Reply.createMany({ data: quoteData, skipDuplicates: true })
       }
 
       // create file
@@ -565,8 +671,8 @@ async function CacheBulletin(from, bulletin, isFromNode) {
       }
 
       // send to subscribers
-      if (SubscribeMap[from] && SubscribeMap[from].length > 0) {
-        for (const subscriber of SubscribeMap[from]) {
+      if (subscribeMap[from] && subscribeMap[from].length > 0) {
+        for (const subscriber of subscribeMap[from]) {
           SendMessage(subscriber, JSON.stringify(bulletin))
         }
       }
@@ -586,23 +692,23 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 }
 
 function clearSubscribe(address) {
-  Object.entries(SubscribeMap).forEach(([key, value]) => {
+  Object.entries(subscribeMap).forEach(([key, value]) => {
     let new_value = value.filter(a => a !== address)
-    SubscribeMap[key] = new_value
+    subscribeMap[key] = new_value
   })
 }
 
-function HandelBulletinSubscribe(request, from) {
+function HandleBulletinSubscribe(request, from) {
   clearSubscribe(from)
   for (let i = 0; i < request.List.length; i++) {
     const subscribe_address = request.List[i]
     if (subscribe_address !== from) {
       let new_value = []
-      if (SubscribeMap[subscribe_address] !== undefined) {
-        new_value = SubscribeMap[subscribe_address]
+      if (subscribeMap[subscribe_address] !== undefined) {
+        new_value = subscribeMap[subscribe_address]
       }
       new_value.push(from)
-      SubscribeMap[subscribe_address] = new_value
+      subscribeMap[subscribe_address] = new_value
     }
   }
 }
@@ -660,8 +766,9 @@ async function CacheECDH(json) {
   } else {
     if (json1 != "") {
       if (dh.json1 != "") {
-        let old_json1 = JSON.parse(dh.json1)
-        if (json.Timestamp >= old_json1.Timestamp) {
+        let old_json1
+        try { old_json1 = JSON.parse(dh.json1) } catch { old_json1 = null }
+        if (old_json1 && json.Timestamp >= old_json1.Timestamp) {
           return
         }
       }
@@ -680,8 +787,9 @@ async function CacheECDH(json) {
       })
     } else if (json2 != "") {
       if (dh.json2 != "") {
-        let old_json2 = JSON.parse(dh.json2)
-        if (json.Timestamp >= old_json2.Timestamp) {
+        let old_json2
+        try { old_json2 = JSON.parse(dh.json2) } catch { old_json2 = null }
+        if (old_json2 && json.Timestamp >= old_json2.Timestamp) {
           return
         }
       }
@@ -702,7 +810,7 @@ async function CacheECDH(json) {
   }
 }
 
-async function HandelECDHSync(json) {
+async function HandleECDHSync(json) {
   let address1 = ""
   let address2 = ""
   let sour_address = rippleKeyPairs.deriveAddress(json.PublicKey)
@@ -770,15 +878,22 @@ async function CachePrivateMessage(json) {
       }
     })
   } else if (last_msg === null) {
-    let msg = GenPrivateMessageSync(dest_address, 0, SelfPublicKey, SelfPrivateKey)
+    let msg = GenPrivateMessageSync(dest_address, 0, 0, SelfPublicKey, SelfPrivateKey)
     SendMessage(sour_address, msg)
   } else if (last_msg !== null && last_msg.sequence < json.Sequence) {
-    let msg = GenPrivateMessageSync(dest_address, last_msg.sequence, SelfPublicKey, SelfPrivateKey)
+    let msg = GenPrivateMessageSync(dest_address, last_msg.sequence, last_msg.sequence, SelfPublicKey, SelfPrivateKey)
     SendMessage(sour_address, msg)
   }
 }
 
-async function HandelPrivateMessageSync(json) {
+/**
+ * Handle a private message sync request. Queries the database for all messages
+ * exchanged between two addresses that have sequence numbers higher than what
+ * the requester already has, then sends them back in ascending order.
+ * @param {object} json - PrivateMessageSync message with PublicKey, To, SelfSequence, PairSequence
+ * @returns {Promise<void>}
+ */
+async function HandlePrivateMessageSync(json) {
   let from_address = rippleKeyPairs.deriveAddress(json.PublicKey)
   let msg_list = await prisma.PrivateMessage.findMany({
     where: {
@@ -808,15 +923,20 @@ async function HandelPrivateMessageSync(json) {
   })
   let msg_list_length = msg_list.length
   for (let i = 0; i < msg_list_length; i++) {
-    await DelayExec(1000)
     SendMessage(from_address, msg_list[i].json)
   }
 }
 
 // group
-async function HandelGroupSync(from) {
+/**
+ * Handle a group sync request. Looks up all groups the given address is a member of,
+ * fetches their create/delete JSON from the database, and sends a GroupList response.
+ * @param {string} from - The XRPL address requesting group membership data
+ * @returns {Promise<void>}
+ */
+async function HandleGroupSync(from) {
   let group_hash_list = []
-  Object.entries(GroupMap).forEach(([hash, member]) => {
+  Object.entries(groupMap).forEach(([hash, member]) => {
     if (member.includes(from)) {
       group_hash_list.push(hash)
     }
@@ -837,9 +957,13 @@ async function HandelGroupSync(from) {
     for (let i = 0; i < group_list.length; i++) {
       const group = group_list[i]
       if (group.delete_json !== null) {
-        group_create_json_list.push(JSON.parse(group.delete_json))
+        let parsedGroup
+        try { parsedGroup = JSON.parse(group.delete_json) } catch { parsedGroup = null }
+        if (parsedGroup) group_create_json_list.push(parsedGroup)
       } else {
-        group_create_json_list.push(JSON.parse(group.create_json))
+        let parsedGroup
+        try { parsedGroup = JSON.parse(group.create_json) } catch { parsedGroup = null }
+        if (parsedGroup) group_create_json_list.push(parsedGroup)
       }
     }
     if (group_create_json_list.length > 0) {
@@ -873,46 +997,58 @@ async function CacheGroup(group) {
         }
       })
       if (result > 0) {
-        delete GroupMap[group.Hash]
+        delete groupMap[group.Hash]
       }
     }
   } else if (group.ObjectType === ObjectType.GroupCreate) {
-    if (db_g === null) {
-      let result = await prisma.Group.create({
-        data: {
-          hash: group.Hash,
-          created_by: address,
-          member: JSON.stringify(group.Member),
-          created_at: group.Timestamp,
-          create_json: JSON.stringify(group)
-        }
-      })
+    await prisma.Group.upsert({
+      where: { hash: group.Hash },
+      create: {
+        hash: group.Hash,
+        created_by: address,
+        member: JSON.stringify(group.Member),
+        created_at: group.Timestamp,
+        create_json: JSON.stringify(group)
+      },
+      update: {} // GroupCreate only creates; no update needed for existing records
+    })
 
-      if (result) {
-        let members = group.Member
-        members.push(address)
-        GroupMap[group.Hash] = members
-      }
-    }
+    let members = group.Member
+    members.push(address)
+    groupMap[group.Hash] = members
   }
 }
 
 // send
-function SendMessage(address, message) {
-  // ConsoleInfo(`###################LOG################### Send Message:`)
-  // ConsoleWarn(message)
-  if (Conns[address] && Conns[address].readyState === WebSocket.OPEN) {
-    Conns[address].send(message)
+/** Generic sender: looks up a key in a connection map, checks readyState, and sends. */
+function sendTo(key, message, connMap) {
+  try {
+    if (connMap[key] && connMap[key].readyState === WebSocket.OPEN) {
+      connMap[key].send(message)
+    }
+  } catch (err) {
+    ConsoleWarn(`sendTo failed for ${key}: ${err.message}`)
   }
 }
 
-// handle Object
-async function handleObject(from, message, json, isFromNode) {
-  if (json.To != null) {
-    // forward message
-    SendMessage(json.To, message)
-  }
+/** Send to a client by address (uses Conns map). */
+function SendMessage(address, message) {
+  sendTo(address, message, Conns)
+}
 
+// handle Object
+/**
+ * Route an incoming message by its ObjectType numeric code.
+ * Handles Bulletins, ServerAddressLists, PrivateMessages, ECDH handshakes,
+ * AvatarLists, GroupLists, and GroupMessageLists. Each case performs
+ * signature verification, caching, and optional message forwarding.
+ * @param {string} from - Source XRPL address of the sender
+ * @param {string} message - Raw JSON string of the message (for forwarding)
+ * @param {object} json - Parsed and validated message object
+ * @param {boolean} isFromNode - True if the message arrived via node-to-node sync
+ * @returns {Promise<void>}
+ */
+async function handleObject(from, message, json, isFromNode) {
   switch (json.ObjectType) {
     case ObjectType.Bulletin:
       if (VerifyJsonSignature(json)) {
@@ -932,8 +1068,7 @@ async function handleObject(from, message, json, isFromNode) {
       }
       break
     case ObjectType.ServerAddressList:
-      // >>>>>>>>>>>>>>>>
-      // Node Interaction
+      // === Node Interaction ===
       // pull step 2: fetch account latest bulletin
       let items = json.List
       if (WhiteList.length > 0) {
@@ -941,7 +1076,6 @@ async function handleObject(from, message, json, isFromNode) {
       }
 
       for (let i = 0; i < items.length; i++) {
-        await DelayExec(1000)
         const item = items[i]
         let bulletin = await prisma.Bulletin.findFirst({
           where: {
@@ -985,7 +1119,6 @@ async function handleObject(from, message, json, isFromNode) {
         let msg = GenServerAddressListRequest(json.Page + 1, SelfPublicKey, SelfPrivateKey)
         SendMessage(from, msg)
       }
-      // <<<<<<<<<<<<<<<<
       break
     case ObjectType.PrivateMessage:
       if (VerifyJsonSignature(json)) {
@@ -996,7 +1129,7 @@ async function handleObject(from, message, json, isFromNode) {
     case ObjectType.ECDH:
       if (VerifyJsonSignature(json)) {
         CacheECDH(json)
-        HandelECDHSync(json)
+        HandleECDHSync(json)
         SendMessage(json.To, message)
       }
       break
@@ -1018,7 +1151,7 @@ async function handleObject(from, message, json, isFromNode) {
       }
       break
     case ObjectType.GroupMessageList:
-      let members = GroupMap[json.Hash]
+      let members = groupMap[json.Hash]
       if (members) {
         if (members.includes(from) && members.includes(json.To)) {
           SendMessage(json.To, message)
@@ -1031,14 +1164,25 @@ async function handleObject(from, message, json, isFromNode) {
 }
 
 // handle Action
+/**
+ * Route an incoming message by its ActionCode. Handles client actions such as
+ * BulletinRequest, BulletinSubscribe, ServerAddressRequest, ReplyBulletinRequest,
+ * TagBulletinRequest, RandomBulletinRequest, FileRequest, AvatarRequest,
+ * PrivateMessageSync, GroupSync, and GroupMessageSync. All actions require
+ * signature verification before processing.
+ * @param {string} from - Source XRPL address of the sender
+ * @param {string} message - Raw JSON string of the message (for forwarding)
+ * @param {object} json - Parsed and validated message object
+ * @returns {Promise<void>}
+ */
 async function handleAction(from, message, json) {
-  if (json.To != undefined) {
-    // forward message
-    SendMessage(json.To, message)
-  }
-
   if (!VerifyJsonSignature(json)) {
     return
+  }
+
+  // forward message only after signature verification succeeds
+  if (json.To != undefined) {
+    SendMessage(json.To, message)
   }
 
   if (json.Action === ActionCode.BulletinRequest) {
@@ -1070,7 +1214,7 @@ async function handleAction(from, message, json) {
       }
     }
   } else if (json.Action === ActionCode.BulletinSubscribe) {
-    HandelBulletinSubscribe(json, from)
+    HandleBulletinSubscribe(json, from)
   } else if (json.Action === ActionCode.ServerAddressRequest && json.Page > 0) {
     let where = WhiteList.length > 0 ? { address: { in: WhiteList } } : {}
 
@@ -1136,7 +1280,9 @@ async function handleAction(from, message, json) {
     })
     tmp_list = []
     reply_json_list.forEach(reply => {
-      tmp_list.push(JSON.parse(reply.json))
+      let parsedReply
+      try { parsedReply = JSON.parse(reply.json) } catch { parsedReply = null }
+      if (parsedReply) tmp_list.push(parsedReply)
     })
 
     let total = await prisma.Reply.count({
@@ -1188,7 +1334,9 @@ async function handleAction(from, message, json) {
     ])
     let tmp_list = []
     list.forEach(bulletin => {
-      tmp_list.push(JSON.parse(bulletin.json))
+      let parsedBulletin
+      try { parsedBulletin = JSON.parse(bulletin.json) } catch { parsedBulletin = null }
+      if (parsedBulletin) tmp_list.push(parsedBulletin)
     })
     let total_page = 0
     if (total > 0) {
@@ -1202,7 +1350,9 @@ async function handleAction(from, message, json) {
     const list = await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ORDER BY RANDOM() LIMIT ${20}`
     let tmp_list = []
     list.forEach(bulletin => {
-      tmp_list.push(JSON.parse(bulletin.json))
+      let parsedBulletin
+      try { parsedBulletin = JSON.parse(bulletin.json) } catch { parsedBulletin = null }
+      if (parsedBulletin) tmp_list.push(parsedBulletin)
     })
 
     if (tmp_list.length > 0) {
@@ -1210,15 +1360,15 @@ async function handleAction(from, message, json) {
       SendMessage(from, msg)
     }
   } else if (json.Action === ActionCode.FileRequest) {
-    HandelFileRequest(json, from)
+    HandleFileRequest(json, from)
   } else if (json.Action === ActionCode.AvatarRequest) {
-    HandelAvatarReqeust(json, from)
+    HandleAvatarRequest(json, from)
   } else if (json.Action === ActionCode.PrivateMessageSync) {
-    HandelPrivateMessageSync(json)
+    HandlePrivateMessageSync(json)
   } else if (json.Action === ActionCode.GroupSync) {
-    HandelGroupSync(from, json)
+    HandleGroupSync(from)
   } else if (json.Action === ActionCode.GroupMessageSync) {
-    let members = GroupMap[json.Hash]
+    let members = groupMap[json.Hash]
     if (members) {
       let tmp_members = shuffleArray(members)
       for (let i = 0; i < tmp_members.length; i++) {
@@ -1232,6 +1382,13 @@ async function handleAction(from, message, json) {
   }
 }
 
+/**
+ * Synchronize a reconnecting client by sending its missing bulletins, pending file
+ * chunks, incomplete ECDH handshakes, and group membership data. Called during the
+ * Declare action flow when a new client connection is established.
+ * @param {string} address - The XRPL address of the client to synchronize
+ * @returns {Promise<void>}
+ */
 async function SyncClientRequest(address) {
   // bulletin
   let bulletin_list = await prisma.Bulletin.findMany({
@@ -1297,7 +1454,7 @@ async function SyncClientRequest(address) {
   msg = GenGroupSync(SelfPublicKey, SelfPrivateKey)
   SendMessage(address, msg)
 
-  HandelGroupSync(address)
+  HandleGroupSync(address)
 }
 
 async function checkMessage(ws, message, isFromNode = false) {
@@ -1305,10 +1462,8 @@ async function checkMessage(ws, message, isFromNode = false) {
   ConsoleInfo(`${message}`)
   // ConsoleInfo(`${message.slice(0, 512)}`)
   let json = MsgValidate(message)
-  // console.log(json)
   if (json === false) {
-    // sendServerMessage(ws, MessageCode.JsonSchemaInvalid)
-    teminateConn(ws)
+    terminateConn(ws)
   } else if (json.ObjectType) {
     let connAddress = fetchConnAddress(ws)
     handleObject(connAddress, message, json, isFromNode)
@@ -1324,13 +1479,13 @@ async function checkMessage(ws, message, isFromNode = false) {
       } else {
         if (!VerifyJsonSignature(json)) {
           // sendServerMessage(ws, MessageCode.SignatureInvalid)
-          teminateConn(ws)
+          terminateConn(ws)
           return
         }
 
-        if (json.Timestamp + 60000 < Date.now()) {
+        if (json.Timestamp + DECLARE_TIMESTAMP_TOLERANCE_MS < Date.now()) {
           // sendServerMessage(ws, MessageCode.TimestampInvalid)
-          teminateConn(ws)
+          terminateConn(ws)
           return
         }
 
@@ -1342,7 +1497,7 @@ async function checkMessage(ws, message, isFromNode = false) {
               Code: "NotInWhitelist",
               Message: "Your address is not in the whitelist"
             }))
-            teminateConn(ws)
+            terminateConn(ws)
             return
           }
 
@@ -1361,7 +1516,6 @@ async function checkMessage(ws, message, isFromNode = false) {
 
           let msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL)
           SendMessage(address, msg)
-          await DelayExec(1000)
           SyncClientRequest(address)
         } else if (Conns[address] && Conns[address] !== ws && Conns[address].readyState === WebSocket.OPEN) {
           // new connection kick old conection with same address
@@ -1370,20 +1524,18 @@ async function checkMessage(ws, message, isFromNode = false) {
           ws._connAddress = address
           Conns[address] = ws
         } else {
-          ws.send("WTF...")
-          teminateConn(ws)
+          ws.send(JSON.stringify({ error: "Duplicate connection rejected" }))
+          terminateConn(ws)
         }
       }
     }
   }
 }
 
-// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// Node Interaction
+// === Node Interaction ===
+/** Send to a peer node by URL (uses NodeConns map). */
 function SendToNode(url, message) {
-  if (NodeConns[url] != null && NodeConns[url].readyState === WebSocket.OPEN) {
-    NodeConns[url].send(message)
-  }
+  sendTo(url, message, NodeConns)
 }
 
 function fetchFileFromNode(url, address, hash, chunk_cursor) {
@@ -1396,9 +1548,9 @@ function fetchFileFromNode(url, address, hash, chunk_cursor) {
     Address: address,
     Timestamp: Date.now()
   }
-  let prev_request = FileRequestList.filter(r => r.Hash === hash)
-  if (prev_request.length === 0) {
-    FileRequestList.push(tmp)
+  let prev_request = fileRequestList.has(nonce) || fileRequestList.values().some(r => r.Hash === hash)
+  if (!prev_request) {
+    fileRequestList.set(nonce, tmp)
     let msg = GenFileRequest(FileRequestType.File, hash, nonce, chunk_cursor, SelfPublicKey, SelfPrivateKey)
     SendToNode(url, msg)
   }
@@ -1416,15 +1568,6 @@ async function downloadBulletinFile(url) {
         equals: false
       }
     }
-    // where: {
-    //   NOT: [
-    //     {
-    //       chunk_length: {
-    //         equals: prisma.File.fields.chunk_cursor
-    //       }
-    //     }
-    //   ]
-    // }
   })
 
   if (file_list && file_list.length > 0) {
@@ -1442,28 +1585,22 @@ function pullBulletin(url) {
   SendToNode(url, msg)
 }
 
+/**
+ * Push new bulletins to a peer node by requesting each address's next sequence.
+ * Queries the database for max(sequence) per address and sends a BulletinRequest
+ * for the next expected sequence number to the target node.
+ * @param {string} url - WebSocket URL of the peer node to push bulletins to
+ * @returns {Promise<void>}
+ */
 async function pushBulletin(url) {
-  let where = WhiteList.length > 0 ? { address: { in: WhiteList } } : {}
+  // Use GROUP BY to get max(sequence) per address in a single query instead of loading all rows
+  let whereClause = WhiteList.length > 0 ? `WHERE address IN (${WhiteList.map(a => `'${a}'`).join(',')})` : ''
+  let bulletin_list = await prisma.$queryRawUnsafe(
+    `SELECT address, MAX(sequence) as max_seq FROM "Bulletin" ${whereClause} GROUP BY address`
+  )
 
-  let bulletin_list = await prisma.Bulletin.findMany({
-    where,
-    select: {
-      address: true,
-      sequence: true
-    }
-  })
-  let bulletin_sequence = {}
-  bulletin_list.forEach(bulletin => {
-    if (bulletin_sequence[bulletin.address] === undefined) {
-      bulletin_sequence[bulletin.address] = bulletin.sequence
-    } else if (bulletin_sequence[bulletin.address] < bulletin.sequence) {
-      bulletin_sequence[bulletin.address] = bulletin.sequence
-    }
-  })
-
-  for (const address in bulletin_sequence) {
-    await DelayExec(1000)
-    let msg = GenBulletinRequest(address, bulletin_sequence[address] + 1, address, SelfPublicKey, SelfPrivateKey)
+  for (const row of bulletin_list) {
+    let msg = GenBulletinRequest(String(row.address), Number(row.max_seq) + 1, String(row.address), SelfPublicKey, SelfPrivateKey)
     SendToNode(url, msg)
   }
 }
@@ -1487,32 +1624,33 @@ function connectNode(node) {
     SyncNodeData(node.URL)
   })
 
-  ws.on('message', (data, isBinary) => {
-    if (isBinary) {
-      const nonce = BufferToUint32(Uint8Array.prototype.slice.call(data, 0, 4))
-      const content = Uint8Array.prototype.slice.call(data, 4)
-      for (let i = 0; i < FileRequestList.length; i++) {
-        const request = FileRequestList[i]
-        if (request.Nonce === nonce) {
-          if (request.Type === FileRequestType.PrivateChatFile || request.Type === FileRequestType.GroupChatFile) {
-            // forward
-            FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
-            SendMessage(request.From, data)
-          } else {
-            saveBufferFile(request, content)
-          }
-          break
-        }
+  ws.on('message', async (data, isBinary) => {
+    try {
+      if (isBinary) {
+        handleBinaryMessage(data)
+      } else {
+        let message = data.toString()
+        await checkMessage(ws, message, true)
       }
-    } else {
-      let message = data.toString()
-      checkMessage(ws, message, true)
+    } catch (err) {
+      ConsoleError(`[node-message-error] Failed to process node message from ${fetchNodeConnURL(ws)}: ${err.message}`)
+      if (err.stack) {
+        ConsoleError(err.stack)
+      }
     }
   })
 
   ws.on('close', function close() {
-    ConsoleWarn(`disconnected <=X=> ${node.URL}`)
-    teminateConn(ws)
+    try {
+      ConsoleWarn(`disconnected <=X=> ${node.URL}`)
+      terminateConn(ws)
+    } catch (err) {
+      ConsoleError(`[node-close-error] Failed to handle node close for ${node.URL}: ${err.message}`)
+    }
+  })
+
+  ws.on('error', (error) => {
+    ConsoleWarn(`Node connection error for ${node.URL}: ${error.message}`)
   })
 }
 
@@ -1544,71 +1682,107 @@ function keepNodeSync() {
     }
   })
 }
-// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-async function loadGroupMap() {
+async function loadgroupMap() {
   let group_list = await prisma.Group.findMany()
   for (let i = 0; i < group_list.length; i++) {
     const group = group_list[i]
-    let group_member = JSON.parse(group.member)
+    let group_member
+    try { group_member = JSON.parse(group.member) } catch { continue }
     group_member.push(group.created_by)
-    GroupMap[group.hash] = group_member
+    groupMap[group.hash] = group_member
   }
-  ConsoleWarn(`*****GroupMap:`)
-  console.log(GroupMap)
+  ConsoleWarn(`*****groupMap:`)
+  ConsoleInfo(JSON.stringify(groupMap, null, 2))
 }
 
 async function printStat() {
-  let bulletin_list = await prisma.Bulletin.findMany()
-  ConsoleWarn(`BulletinCount: ${bulletin_list.length}`)
+  const bulletinCount = await prisma.Bulletin.count()
+  ConsoleWarn(`BulletinCount: ${bulletinCount}`)
 
-  let file_list = await prisma.File.findMany()
-  ConsoleWarn(`****FileCount: ${file_list.length}`)
+  const fileCount = await prisma.File.count()
+  ConsoleWarn(`****FileCount: ${fileCount}`)
 
-  let address_list = await prisma.Bulletin.groupBy({
+  const addressCount = await prisma.Bulletin.groupBy({
     by: "address"
   })
-  ConsoleWarn(`*AddressCount: ${address_list.length}`)
+  ConsoleWarn(`*AddressCount: ${addressCount.length}`)
 
-  loadGroupMap()
+  loadgroupMap()
 }
 
+// refreshData - Startup routine that rebuilds bulletin chain links and association indexes.
+// Phase 1: Restore pre_hash <-> next_hash pointers on the bulletin chain.
+// Phase 2: Batch-create all tags referenced across bulletins (single upsert).
+//           Then bulk-connect tag relations so each Bulletin node has its tags linked.
+// Phase 3: Upsert file records and connect Bulletin <-> File relations per-bulletin,
+//           then fetch any missing chunks from peer nodes.
+// Phase 4: Batch-create Reply (quote) links in a single insertMany to avoid N+1 queries.
 async function refreshData() {
-  // update pre_bulletin's next_hash
-  let bulletin_list = await prisma.Bulletin.findMany({
-    orderBy: {
-      sequence: "desc"
-    }
+  // Fetch all bulletins needed for processing
+  const bulletin_list = await prisma.Bulletin.findMany({
+    select: { hash: true, pre_hash: true, sequence: true, json: true, signed_at: true },
+    orderBy: { sequence: "desc" },
   })
+
+  // Phase 1: Restore next_hash chain pointers
   for (let i = 0; i < bulletin_list.length; i++) {
     const bulletin = bulletin_list[i]
     if (bulletin.sequence != 1) {
       try {
         await prisma.Bulletin.update({
-          where: {
-            hash: bulletin.pre_hash
-          },
-          data: {
-            next_hash: bulletin.hash
-          }
+          where: { hash: bulletin.pre_hash },
+          data: { next_hash: bulletin.hash }
         })
       } catch (e) {
-        // console.log(e)
+        ConsoleDebug(`[refreshData] Failed to update next_hash for pre_hash ${bulletin.pre_hash} -> ${bulletin.hash}: ${e.message}`)
       }
     }
   }
 
-  // link bulletin tag quote file
-  for (const bulletin of bulletin_list) {
-    let bulletin_json = JSON.parse(bulletin.json)
-    const bulletin_address = rippleKeyPairs.deriveAddress(bulletin_json.PublicKey)
+  // Pre-parse all bulletin JSON upfront
+  const parsed = bulletin_list.map(b => {
+    let bJson
+    try { bJson = JSON.parse(b.json) } catch { bJson = null }
+    return bJson ? { hash: b.hash, json: bJson, signed_at: b.signed_at } : null
+  }).filter(Boolean)
 
-    if (bulletin_json.Tag && Array.isArray(bulletin_json.Tag) && bulletin_json.Tag.length > 0) {
-      await BindBulletinTag(bulletin.hash, bulletin_json.Tag)
+  // Phase 2: Batch-create all unique tags across every bulletin, then bulk-connect
+  const allTagNames = new Set()
+  for (const { json } of parsed) {
+    if (json.Tag && Array.isArray(json.Tag)) {
+      for (const tag of json.Tag) allTagNames.add(tag)
     }
+  }
 
-    if (bulletin_json.File) {
-      const files_to_fetch = await BindBulletinFile(bulletin.hash, bulletin_json.File)
+  if (allTagNames.size > 0) {
+    await prisma.Tag.createMany({
+      data: [...allTagNames].map(name => ({ name })),
+      skipDuplicates: true
+    })
+  }
+
+  // Bulk-connect tags to bulletins in groups to avoid one DB round-trip per bulletin
+  const tagBatchSize = 50
+  for (let i = 0; i < parsed.length; i += tagBatchSize) {
+    const batch = parsed.slice(i, i + tagBatchSize).filter(({ json }) => json.Tag && Array.isArray(json.Tag) && json.Tag.length > 0)
+    if (batch.length === 0) continue
+
+    await prisma.$transaction(
+      batch.map(({ hash, json: bJson }) =>
+        prisma.Bulletin.update({
+          where: { hash },
+          data: { tags: { connect: [...new Set(bJson.Tag)].map(name => ({ name })) } }
+        })
+      )
+    )
+  }
+
+  // Phase 3: Files - must stay per-bulletin (BindBulletinFile ties files to one bulletin)
+  for (const { hash, json: bJson } of parsed) {
+    if (bJson.File) {
+      const bulletin_address = rippleKeyPairs.deriveAddress(bJson.PublicKey)
+      const files_to_fetch = await BindBulletinFile(hash, bJson.File)
       for (let i = 0; i < files_to_fetch.length; i++) {
         const file = files_to_fetch[i]
         if (!file.is_saved) {
@@ -1616,31 +1790,28 @@ async function refreshData() {
         }
       }
     }
+  }
 
-    if (bulletin_json.Quote) {
-      if (bulletin_json.Quote.length != 0) {
-        for (const quote of bulletin_json.Quote) {
-          let result = await prisma.Reply.findFirst({
-            where: {
-              post_hash: quote.Hash,
-              reply_hash: bulletin.hash
-            }
-          })
-          if (!result) {
-            result = await prisma.Reply.create({
-              data: {
-                post_hash: quote.Hash,
-                reply_hash: bulletin.hash,
-                signed_at: bulletin.signed_at
-              }
-            })
-            if (result) {
-              console.log(`linking`, quote)
-            }
-          }
+  // Phase 4: Batch-quote links - collect all new replies, insert in one shot
+  const existingQuotes = await prisma.Reply.findMany({ select: { post_hash: true, reply_hash: true } })
+  const existingSet = new Set(existingQuotes.map(q => `${q.post_hash}:${q.reply_hash}`))
+
+  const newReplies = []
+  for (const { hash, json: bJson, signed_at } of parsed) {
+    if (bJson.Quote && Array.isArray(bJson.Quote)) {
+      for (const quote of bJson.Quote) {
+        const key = `${quote.Hash}:${hash}`
+        if (!existingSet.has(key)) {
+          newReplies.push({ post_hash: quote.Hash, reply_hash: hash, signed_at })
+          existingSet.add(key)
         }
       }
     }
+  }
+
+  if (newReplies.length > 0) {
+    await prisma.Reply.createMany({ data: newReplies, skipDuplicates: true })
+    ConsoleInfo(`[refreshData] Linked ${newReplies.length} new quote(s) in batch`)
   }
 }
 
@@ -1653,43 +1824,43 @@ function startServerDaemon() {
     })
 
     ServerDaemon.on("connection", function connection(ws) {
-      ws.on("message", (data, isBinary) => {
-        if (isBinary) {
-          const nonce = BufferToUint32(Uint8Array.prototype.slice.call(data, 0, 4))
-          ConsoleWarn(nonce)
-          const content = Uint8Array.prototype.slice.call(data, 4)
-          for (let i = 0; i < FileRequestList.length; i++) {
-            const request = FileRequestList[i]
-            if (request.Nonce === nonce) {
-              if (request.Type === FileRequestType.PrivateChatFile || request.Type === FileRequestType.GroupChatFile) {
-                // forward file data
-                FileRequestList = FileRequestList.filter(r => r.Nonce !== request.Nonce)
-                SendMessage(request.From, data)
-              } else {
-                saveBufferFile(request, content)
-              }
-              break
-            }
+      ws.on("message", async (data, isBinary) => {
+        try {
+          if (isBinary) {
+            handleBinaryMessage(data)
+          } else {
+            let message = data.toString()
+            await checkMessage(ws, message, false)
           }
-        } else {
-          let message = data.toString()
-          checkMessage(ws, message, false)
+        } catch (err) {
+          ConsoleError(`[message-error] Failed to process client message: ${err.message}`)
+          if (err.stack) {
+            ConsoleError(err.stack)
+          }
         }
       })
 
       ws.on("close", function close() {
-        let connAddress = fetchConnAddress(ws)
-        if (connAddress != null) {
-          ConsoleWarn(`client <${connAddress}> disconnect...`)
-          delete Conns[connAddress]
-          clearSubscribe(connAddress)
+        try {
+          let connAddress = fetchConnAddress(ws)
+          if (connAddress != null) {
+            ConsoleWarn(`client <${connAddress}> disconnect...`)
+            delete Conns[connAddress]
+            clearSubscribe(connAddress)
+          }
+        } catch (err) {
+          ConsoleError(`[close-error] Failed to handle client close: ${err.message}`)
         }
+      })
+
+      ws.on('error', (error) => {
+        ConsoleWarn(`Client WebSocket error: ${error.message}`)
       })
     })
   }
 }
 
-function main() {
+async function main() {
   fs.mkdirSync(path.resolve(`./${FileDir}`), { recursive: true })
   fs.mkdirSync(path.resolve(`./${AvatarDir}`), { recursive: true })
 
@@ -1698,25 +1869,23 @@ function main() {
   SelfAddress = rippleKeyPairs.deriveAddress(keypair.publicKey)
   SelfPublicKey = keypair.publicKey
   SelfPrivateKey = keypair.privateKey
-  ConsoleWarn(`use******Seed: ${seed}`)
   ConsoleWarn(`use***Address: ${SelfAddress}`)
 
-  printStat()
-  refreshData()
+  await printStat()
+  await refreshData()
   startServerDaemon()
 
-  // >>>>>>>>>>>>>>>>
-  // Node Interaction
+  // === Node Interaction: load config & start daemons ===
   try {
     let config = fs.readFileSync(ConfigPath, 'utf8')
     config = JSON.parse(config)
     ConsoleWarn(`*******Config:`)
-    console.log(config)
+    ConsoleInfo(JSON.stringify(config, null, 2))
     if (config.SelfURL !== '') {
       SelfURL = config.SelfURL
     }
     NodeList = config.NodeList
-    console.log(NodeList)
+    ConsoleInfo(JSON.stringify(NodeList, null, 2))
 
     WhiteList = Array.isArray(config.WhiteList) ? config.WhiteList : []
     ConsoleWarn(`WhiteList loaded: ${WhiteList.length} addresses`)
@@ -1727,14 +1896,36 @@ function main() {
     }
 
     if (jobNodeConn === null) {
-      jobNodeConn = setInterval(keepNodeConn, 5000)
+      jobNodeConn = setInterval(keepNodeConn, NODE_RECONNECT_INTERVAL_MS)
     }
     if (jobNodeSync === null) {
-      jobNodeSync = setInterval(keepNodeSync, 5 * 60 * 1000)
+      jobNodeSync = setInterval(keepNodeSync, NODE_SYNC_INTERVAL_MS)
+    }
+
+    // Periodic purge of expired file request entries
+    if (jobFilePurge === null) {
+      jobFilePurge = setInterval(() => {
+        purgeExpiredFileRequests()
+      }, FILE_PURGE_INTERVAL_MS)
     }
   } catch (error) {
+    ConsoleError(`[main] Failed to load node config from ${ConfigPath}: ${error.message}`)
   }
-  // <<<<<<<<<<<<<<<<
 }
+
+async function gracefulShutdown(signal) {
+  ConsoleWarn(`[${signal}] Shutting down gracefully...`)
+  if (jobNodeConn) clearInterval(jobNodeConn)
+  if (jobNodeSync) clearInterval(jobNodeSync)
+  if (jobFilePurge) clearInterval(jobFilePurge)
+  for (const addr in Conns) { try { Conns[addr].close() } catch {} }
+  for (const url in NodeConns) { try { NodeConns[url].close() } catch {} }
+  ConsoleWarn('All connections closed. Exiting.')
+  await prisma.$disconnect()
+  process.exit(0)
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 
 main()

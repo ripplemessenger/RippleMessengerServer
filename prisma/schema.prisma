@@ -32,6 +32,9 @@ model Bulletin {
 
   tags       Tag[]
   files       File[]
+
+  @@index([address, sequence])
+  @@index([signed_at])
 }
 
 model Tag {
@@ -45,9 +48,11 @@ model File {
   chunk_length Int
   chunk_cursor Int
   updated_at   BigInt
-  is_saved     Boolean @default(false) 
+  is_saved     Boolean @default(false)
 
   bulletins    Bulletin[]
+
+  @@index([is_saved])
 }
 
 model Reply {
@@ -67,6 +72,7 @@ model ECDH {
   json2     String?
 
   @@id([address1, address2, partition, sequence])
+  @@index([address1, address2])
 }
 
 model PrivateMessage {
@@ -76,6 +82,8 @@ model PrivateMessage {
   sequence     Int
   signed_at    BigInt
   json         String
+
+  @@index([sour_address, dest_address, sequence])
 }
 
 model Group {

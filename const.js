@@ -20,18 +20,13 @@ const PageSize = 20
 const FileDir = 'file'
 const AvatarDir = 'avatar'
 
-const MessageCode = {
-  JsonSchemaInvalid: 0, //json schema invalid...
-  SignatureInvalid: 1, //signature invalid...
-  TimestampInvalid: 2, //timestamp invalid...
-  BalanceInsufficient: 3, //balance insufficient...
-  NewConnectionOpening: 4, //address changed...
-  AddressChanged: 5, //new connection with same address is opening...
-  ToSelfIsForbidden: 6, //To self is forbidden...
-  ToNotExist: 7, //To not exist...
-
-  GatewayDeclareSuccess: 1000 //gateway declare success...
-}
+// Timing constants
+const FILE_REQUEST_TTL_MS = 120 * 1000        // 2 min file request expiry
+const AVATAR_UPDATE_THROTTLE_MS = 60 * 1000   // 1 min avatar throttle
+const DECLARE_TIMESTAMP_TOLERANCE_MS = 60 * 1000  // 1 min clock skew tolerance
+const NODE_RECONNECT_INTERVAL_MS = 5000       // 5s node reconnect
+const NODE_SYNC_INTERVAL_MS = 5 * 60 * 1000   // 5 min node sync
+const FILE_PURGE_INTERVAL_MS = 60 * 1000       // 1 min file request purge timer
 
 export {
   ConfigPath,
@@ -42,5 +37,10 @@ export {
   PageSize,
   FileDir,
   AvatarDir,
-  MessageCode
+  FILE_REQUEST_TTL_MS,
+  AVATAR_UPDATE_THROTTLE_MS,
+  DECLARE_TIMESTAMP_TOLERANCE_MS,
+  NODE_RECONNECT_INTERVAL_MS,
+  NODE_SYNC_INTERVAL_MS,
+  FILE_PURGE_INTERVAL_MS
 }

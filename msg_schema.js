@@ -119,9 +119,8 @@ const AvatarListSchema = {
 }
 
 // ***bulletin***
-// Object>>>Bulletin
-const BulletinSchema = {
-  "type": "object",
+// Shared bulletin item schema -- used by BulletinSchema and all Bulletin list item definitions
+const BulletinItemProperties = {
   "required": ["ObjectType", "Sequence", "PreHash", "Content", "Timestamp", "PublicKey", "Signature"],
   "maxProperties": 10,
   "properties": {
@@ -168,6 +167,18 @@ const BulletinSchema = {
     "PublicKey": { "type": "string" },
     "Signature": { "type": "string" }
   }
+}
+
+// Object>>>Bulletin
+const BulletinSchema = {
+  "type": "object",
+  ...BulletinItemProperties
+}
+
+// Shared bulletin list item schema -- referenced by Reply/Tag/Random bulletin lists
+const BulletinListItemSchema = {
+  "type": "object",
+  ...BulletinItemProperties
 }
 
 // Action>>>
@@ -301,55 +312,7 @@ const ReplyBulletinListSchema = {
     "TotalPage": { "type": "number" },
     "List": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["ObjectType", "Sequence", "PreHash", "Content", "Timestamp", "PublicKey", "Signature"],
-        "maxProperties": 10,
-        "properties": {
-          "ObjectType": { "type": "number", "const": ObjectType.Bulletin },
-          "Sequence": { "type": "number" },
-          "PreHash": { "type": "string" },
-          "Content": { "type": "string" },
-          "Tag": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": { "type": "string" }
-          },
-          "Quote": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "required": ["Address", "Sequence", "Hash"],
-              "properties": {
-                "Address": { "type": "string" },
-                "Sequence": { "type": "number" },
-                "Hash": { "type": "string" }
-              }
-            }
-          },
-          "File": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "required": ["Name", "Ext", "Size", "Hash"],
-              "properties": {
-                "Name": { "type": "string" },
-                "Ext": { "type": "string" },
-                "Size": { "type": "number" },
-                "Hash": { "type": "string" }
-              }
-            }
-          },
-          "Timestamp": { "type": "number" },
-          "PublicKey": { "type": "string" },
-          "Signature": { "type": "string" }
-        }
-      }
+      "items": BulletinListItemSchema
     }
   }
 }
