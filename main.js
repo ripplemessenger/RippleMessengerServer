@@ -7,9 +7,9 @@ import { PrismaClient } from "@prisma/client"
 const prisma = new PrismaClient()
 
 import { ConsoleInfo, ConsoleWarn, ConsoleError, ConsoleDebug, DelayExec, FileReadHash, QuarterSHA512Message, UniqArray, CheckServerURL, genNonce, FileBufferHash, BufferToUint32, Uint32ToBuffer, VerifyJsonSignature, calcTotalPage, shuffleArray } from './util.js'
-import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch } from './msg_const.js'
+import { ActionCode, ObjectType, GenesisHash, FileRequestType, Epoch, MessageCode } from './msg_const.js'
 import { AvatarDir, ConfigPath, FileChunkSize, FileDir, PageSize, FILE_REQUEST_TTL_MS, AVATAR_UPDATE_THROTTLE_MS, DECLARE_TIMESTAMP_TOLERANCE_MS, NODE_RECONNECT_INTERVAL_MS, NODE_SYNC_INTERVAL_MS, FILE_PURGE_INTERVAL_MS } from './const.js'
-import { GenDeclare, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList, GenServerAddressListRequest, GenServerAddressList, GenBulletinRequestByHash } from './msg_generator.js'
+import { GenDeclare, GenBulletinRequest, GenPrivateMessageSync, GenFileRequest, GenAvatarRequest, GenGroupSync, GenReplyBulletinList, GenTagBulletinList, GenRandomBulletinList, GenServerAddressListRequest, GenServerAddressList, GenBulletinRequestByHash, GenServerNotifyError, GenServerNotifyInfo, GenServerNotifyCache, GenServerNotifyFileProgress } from './msg_generator.js'
 import { MsgValidate } from './msg_validator.js'
 
 /*
@@ -633,6 +633,7 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 
     if (isNewRecord) {
       ConsoleDebug(`[CacheBulletin] New bulletin saved: ${hash}`)
+      SendMessage(from, GenServerNotifyCache(MessageCode.BulletinCached))
 
       if (result.sequence !== 1) {
         try {
@@ -1123,12 +1124,14 @@ async function handleObject(from, message, json, isFromNode) {
     case ObjectType.PrivateMessage:
       if (VerifyJsonSignature(json)) {
         CachePrivateMessage(json)
+        SendMessage(from, GenServerNotifyCache(MessageCode.PrivateMsgCached))
         SendMessage(json.To, message)
       }
       break
     case ObjectType.ECDH:
       if (VerifyJsonSignature(json)) {
         CacheECDH(json)
+        SendMessage(from, GenServerNotifyCache(MessageCode.HandshakeCached))
         HandleECDHSync(json)
         SendMessage(json.To, message)
       }
@@ -1463,6 +1466,7 @@ async function checkMessage(ws, message, isFromNode = false) {
   // ConsoleInfo(`${message.slice(0, 512)}`)
   let json = MsgValidate(message)
   if (json === false) {
+    ws.send(GenServerNotifyError(MessageCode.JsonSchemaInvalid, 'JSON schema validation failed'))
     terminateConn(ws)
   } else if (json.ObjectType) {
     let connAddress = fetchConnAddress(ws)
@@ -1475,16 +1479,16 @@ async function checkMessage(ws, message, isFromNode = false) {
       let connAddress = fetchConnAddress(ws)
       if (connAddress !== null && connAddress !== address) {
         // using different address in same connection
-        // sendServerMessage(ws, MessageCode.AddressChanged)
+        ws.send(GenServerNotifyError(MessageCode.AddressMismatch, 'Address changed within connection'))
       } else {
         if (!VerifyJsonSignature(json)) {
-          // sendServerMessage(ws, MessageCode.SignatureInvalid)
+          ws.send(GenServerNotifyError(MessageCode.SignatureInvalid, 'Message signature verification failed'))
           terminateConn(ws)
           return
         }
 
         if (json.Timestamp + DECLARE_TIMESTAMP_TOLERANCE_MS < Date.now()) {
-          // sendServerMessage(ws, MessageCode.TimestampInvalid)
+          ws.send(GenServerNotifyError(MessageCode.TimestampInvalid, 'Message timestamp out of range'))
           terminateConn(ws)
           return
         }
@@ -1519,12 +1523,12 @@ async function checkMessage(ws, message, isFromNode = false) {
           SyncClientRequest(address)
         } else if (Conns[address] && Conns[address] !== ws && Conns[address].readyState === WebSocket.OPEN) {
           // new connection kick old conection with same address
-          // sendServerMessage(Conns[address], MessageCode.NewConnectionOpening)
+          try { Conns[address].send(GenServerNotifyInfo(MessageCode.KickedByNewConn, 'Kicked by new connection')) } catch {}
           Conns[address].close()
           ws._connAddress = address
           Conns[address] = ws
         } else {
-          ws.send(JSON.stringify({ error: "Duplicate connection rejected" }))
+          ws.send(GenServerNotifyError(MessageCode.AddressMismatch, 'Duplicate connection rejected'))
           terminateConn(ws)
         }
       }
@@ -1918,6 +1922,19 @@ async function gracefulShutdown(signal) {
   if (jobNodeConn) clearInterval(jobNodeConn)
   if (jobNodeSync) clearInterval(jobNodeSync)
   if (jobFilePurge) clearInterval(jobFilePurge)
+
+  // Notify all connected clients before closing
+  const shutdownMsg = GenServerNotifyInfo(MessageCode.ServerShutdown, 'Server is shutting down')
+  for (const addr in Conns) {
+    try {
+      if (Conns[addr].readyState === WebSocket.OPEN) {
+        Conns[addr].send(shutdownMsg)
+      }
+    } catch {}
+  }
+  // Give clients time to receive the notification
+  await new Promise(resolve => setTimeout(resolve, 1000))
+
   for (const addr in Conns) { try { Conns[addr].close() } catch {} }
   for (const url in NodeConns) { try { NodeConns[url].close() } catch {} }
   ConsoleWarn('All connections closed. Exiting.')

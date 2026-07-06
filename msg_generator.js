@@ -1,4 +1,4 @@
-import { ActionCode, ObjectType } from './msg_const.js'
+import { ActionCode, MessageCode, ObjectType } from './msg_const.js'
 import { SignJson } from './util.js'
 
 function GenDeclare(pk, sk, url) {
@@ -131,6 +131,65 @@ function GenGroupSync(pk, sk) {
   return JSON.stringify(SignJson(json, sk))
 }
 
+// === Control-Plane Generators (unsigned) ===
+/**
+ * Generate error notification message
+ * @param {number} code - MessageCode error code (701-704)
+ * @param {string} message - Human-readable error description
+ * @returns {string} JSON string
+ */
+function GenServerNotifyError(code, message) {
+  return JSON.stringify({
+    ActionCode: ActionCode.ServerNotify,
+    MessageCode: code,
+    ErrorMessage: message
+  })
+}
+
+/**
+ * Generate info notification message (KickedByNewConn, ServerShutdown, SyncComplete)
+ * @param {number} code - MessageCode notification code (710-712)
+ * @param {string} [message] - Optional description
+ * @returns {string} JSON string
+ */
+function GenServerNotifyInfo(code, message) {
+  let msg = {
+    ActionCode: ActionCode.ServerNotify,
+    MessageCode: code
+  }
+  if (message) msg.ErrorMessage = message
+  return JSON.stringify(msg)
+}
+
+/**
+ * Generate cache success confirmation
+ * @param {number} code - MessageCode cache code (720/721/723)
+ * @returns {string} JSON string
+ */
+function GenServerNotifyCache(code) {
+  return JSON.stringify({
+    ActionCode: ActionCode.ServerNotify,
+    MessageCode: code
+  })
+}
+
+/**
+ * Generate file transfer progress notification
+ * @param {number} code - MessageCode file code (730-732)
+ * @param {string} hash - File hash identifier
+ * @param {object} [progress] - Optional {ReceivedBytes, TotalBytes}
+ * @returns {string} JSON string
+ */
+function GenServerNotifyFileProgress(code, hash, progress) {
+  let msg = {
+    ActionCode: ActionCode.ServerNotify,
+    MessageCode: code,
+    Hash: hash
+  }
+  if (progress) msg.ProgressInfo = progress
+  return JSON.stringify(msg)
+}
+
 export {
   GenDeclare,
   GenFileRequest,
@@ -148,4 +207,10 @@ export {
   GenPrivateMessageSync,
 
   GenGroupSync,
+
+  // Control-Plane
+  GenServerNotifyError,
+  GenServerNotifyInfo,
+  GenServerNotifyCache,
+  GenServerNotifyFileProgress,
 }

@@ -1,4 +1,4 @@
-import { ActionCode, MessageObjectType, ObjectType } from './msg_const.js'
+import { ActionCode, MessageObjectType, ObjectType, MessageCode } from './msg_const.js'
 
 // Action>>>declare
 // URL for server declare
@@ -768,6 +768,101 @@ const MessageObjectGroupChatFileSchema = {
   }
 }
 
+// === Control-Plane Schemas (unsigned) ===
+
+// Generic error notification: { ActionCode: 800, MessageCode: 701-704, ErrorMessage }
+const ServerNotifyErrorSchema = {
+  "type": "object",
+  "required": ["ActionCode", "MessageCode", "ErrorMessage"],
+  "maxProperties": 3,
+  "properties": {
+    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
+    "MessageCode": {
+      "type": "number",
+      "enum": [
+        MessageCode.JsonSchemaInvalid,
+        MessageCode.SignatureInvalid,
+        MessageCode.TimestampInvalid,
+        MessageCode.AddressMismatch
+      ]
+    },
+    "ErrorMessage": { "type": "string" }
+  }
+}
+
+// Generic notification: { ActionCode: 800, MessageCode: 710-712, ...optional fields }
+const ServerNotifyInfoSchema = {
+  "type": "object",
+  "required": ["ActionCode", "MessageCode"],
+  "properties": {
+    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
+    "MessageCode": {
+      "type": "number",
+      "enum": [
+        MessageCode.KickedByNewConn,
+        MessageCode.ServerShutdown,
+        MessageCode.SyncComplete
+      ]
+    },
+    "ErrorMessage": { "type": "string" }
+  },
+  "additionalProperties": false
+}
+
+// Cache success confirmation: { ActionCode: 800, MessageCode: 720/721/723 }
+const ServerNotifyCacheSchema = {
+  "type": "object",
+  "required": ["ActionCode", "MessageCode"],
+  "maxProperties": 2,
+  "properties": {
+    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
+    "MessageCode": {
+      "type": "number",
+      "enum": [
+        MessageCode.BulletinCached,
+        MessageCode.PrivateMsgCached,
+        MessageCode.HandshakeCached
+      ]
+    }
+  }
+}
+
+// File transfer progress: { ActionCode: 800, MessageCode: 730-732, Hash, ProgressInfo }
+const ServerNotifyFileProgressSchema = {
+  "type": "object",
+  "required": ["ActionCode", "MessageCode"],
+  "properties": {
+    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
+    "MessageCode": {
+      "type": "number",
+      "enum": [
+        MessageCode.FileChunkReceived,
+        MessageCode.FileTransferComplete,
+        MessageCode.FileTransferFailed
+      ]
+    },
+    "Hash": { "type": "string" },
+    "ProgressInfo": {
+      "type": "object",
+      "properties": {
+        "ReceivedBytes": { "type": "number" },
+        "TotalBytes": { "type": "number" }
+      }
+    }
+  }
+}
+
+// Client ACK: { ActionCode: 810, AckFor }
+const ClientAckSchema = {
+  "type": "object",
+  "required": ["ActionCode", "AckFor"],
+  "maxProperties": 2,
+  "properties": {
+    "ActionCode": { "type": "number", "const": ActionCode.ClientAck },
+    "AckFor": { "type": "number" }
+  }
+}
+
 export {
   DeclareSchema,
   FileRequestSchema,
@@ -809,5 +904,12 @@ export {
   // Message Object
   MessageObjectBulletinSchema,
   MessageObjectPrivateChatFileSchema,
-  MessageObjectGroupChatFileSchema
+  MessageObjectGroupChatFileSchema,
+
+  // Control-Plane
+  ServerNotifyErrorSchema,
+  ServerNotifyInfoSchema,
+  ServerNotifyCacheSchema,
+  ServerNotifyFileProgressSchema,
+  ClientAckSchema
 }

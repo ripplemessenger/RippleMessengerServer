@@ -76,6 +76,35 @@ const MessageObjectType = {
   GroupChatFile: 103
 }
 
+// Control-plane: MessageCode (7xx) — server->client, unsigned
+const MessageCode = {
+  // Error codes (informs reason -> may disconnect): 701-704
+  JsonSchemaInvalid: 701,
+  SignatureInvalid: 702,
+  TimestampInvalid: 703,
+  AddressMismatch: 704,
+
+  // Notification codes (informational, no disconnect): 710-712
+  KickedByNewConn: 710,
+  ServerShutdown: 711,
+  SyncComplete: 712,
+
+  // Cache success codes (server local operation confirmation): 720-723
+  BulletinCached: 720,
+  PrivateMsgCached: 721,
+  HandshakeCached: 723,
+
+  // File transfer progress: 730-732
+  FileChunkReceived: 730,
+  FileTransferComplete: 731,
+  FileTransferFailed: 732
+}
+
+// Control-plane ActionCode extensions (8xx) — unsigned, server-initiated or client ack
+ActionCode.ServerNotify = 800
+ActionCode.ServerNotifyAckReq = 801
+ActionCode.ClientAck = 810
+
 export {
   Epoch,
   GenesisAddress,
@@ -84,5 +113,6 @@ export {
   ActionCode,
   ObjectType,
   FileRequestType,
-  MessageObjectType
+  MessageObjectType,
+  MessageCode
 }
