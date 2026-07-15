@@ -115,7 +115,8 @@ function broadcastBulletinToNodes(bulletin) {
  * Checks both client connections (by address) and node connections (by URL).
  * @param {WebSocket} ws - The WebSocket instance to terminate
  */
-function terminateConn(ws) {
+function terminateConn(ws, reason = 'unknown') {
+  ConsoleWarn(`[terminateConn] Closing connection — reason: ${reason}`)
   ws.close()
   let connAddress = fetchConnAddress(ws)
   if (connAddress != null) {
@@ -1467,7 +1468,7 @@ async function checkMessage(ws, message, isFromNode = false) {
   let json = MsgValidate(message)
   if (json === false) {
     ws.send(GenServerNotifyError(MessageCode.JsonSchemaInvalid, 'JSON schema validation failed'))
-    terminateConn(ws)
+    terminateConn(ws, 'schema_validation_failed')
   } else if (json.ObjectType) {
     let connAddress = fetchConnAddress(ws)
     handleObject(connAddress, message, json, isFromNode)
@@ -1479,17 +1480,20 @@ async function checkMessage(ws, message, isFromNode = false) {
       let connAddress = fetchConnAddress(ws)
       if (connAddress !== null && connAddress !== address) {
         // using different address in same connection
+        ConsoleWarn(`[terminateConn] AddressMismatch: conn=${connAddress} msg=${address}`)
         ws.send(GenServerNotifyError(MessageCode.AddressMismatch, 'Address changed within connection'))
       } else {
         if (!VerifyJsonSignature(json)) {
+          ConsoleWarn(`[terminateConn] SignatureInvalid for address ${address} action=${json.Action}`)
           ws.send(GenServerNotifyError(MessageCode.SignatureInvalid, 'Message signature verification failed'))
-          terminateConn(ws)
+          terminateConn(ws, 'signature_invalid')
           return
         }
 
         if (json.Timestamp + DECLARE_TIMESTAMP_TOLERANCE_MS < Date.now()) {
+          ConsoleWarn(`[terminateConn] TimestampInvalid: msg=${json.Timestamp} now=${Date.now()} action=${json.Action}`)
           ws.send(GenServerNotifyError(MessageCode.TimestampInvalid, 'Message timestamp out of range'))
-          terminateConn(ws)
+          terminateConn(ws, 'timestamp_invalid')
           return
         }
 
@@ -1523,13 +1527,17 @@ async function checkMessage(ws, message, isFromNode = false) {
           SyncClientRequest(address)
         } else if (Conns[address] && Conns[address] !== ws && Conns[address].readyState === WebSocket.OPEN) {
           // new connection kick old conection with same address
+          ConsoleWarn(`[terminateConn] KickOldConn: address=${address}`)
           try { Conns[address].send(GenServerNotifyInfo(MessageCode.KickedByNewConn, 'Kicked by new connection')) } catch {}
           Conns[address].close()
           ws._connAddress = address
           Conns[address] = ws
         } else {
+          // Fallback: unregistered connection with non-Declare message
+          let actionLabel = json.Action ?? 'unknown'
+          ConsoleWarn(`[terminateConn] UnregisteredNonDeclare: connAddr=${connAddress} msgAddr=${address} action=${actionLabel}`)
           ws.send(GenServerNotifyError(MessageCode.AddressMismatch, 'Duplicate connection rejected'))
-          terminateConn(ws)
+          terminateConn(ws, `unregistered_action_${actionLabel}`)
         }
       }
     }
