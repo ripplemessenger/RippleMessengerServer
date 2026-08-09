@@ -2079,12 +2079,16 @@ async function checkMessage(ws, message, isFromNode = false) {
 						return;
 					}
 
+					const isNodeConnection = json.URL != null && CheckServerURL(json.URL);
+
 					// new connection and new address
-					ConsoleWarn(`connected <===> client : <${address}>`);
+					ConsoleWarn(
+						`connected <===> ${isNodeConnection ? "node" : "client"} : <${address}>`,
+					);
 					ws._connAddress = address;
 					Conns[address] = ws;
-					if (json.URL != null && CheckServerURL(json.URL)) {
-						// Server Conntion
+					if (isNodeConnection) {
+						// Server Connection
 						NodeList.push({
 							URL: json.URL,
 						});
@@ -2095,8 +2099,11 @@ async function checkMessage(ws, message, isFromNode = false) {
 					const msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL);
 					ConsoleInfo(`[Declare] Sending Declare to ${address}`);
 					SendMessage(address, msg);
-					ConsoleInfo(`[Declare] Calling SyncClientRequest for ${address}`);
-					await SyncClientRequest(address);
+					// Only sync client data for actual clients, not nodes
+					if (!isNodeConnection) {
+						ConsoleInfo(`[Declare] Calling SyncClientRequest for ${address}`);
+						await SyncClientRequest(address);
+					}
 				} else if (
 					Conns[address] &&
 					Conns[address] !== ws &&
