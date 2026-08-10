@@ -533,19 +533,29 @@ async function HandleFileRequest(request, from) {
 			});
 			if (file !== null && file.chunk_cursor === file.chunk_length) {
 				const start = (request.ChunkCursor - 1) * FileChunkSize;
+				if (start >= file.size) {
+					ConsoleWarn(
+						`[HandleFileRequest] Chunk cursor ${request.ChunkCursor} out of range for ${request.Hash}, start=${start}, file.size=${file.size}`,
+					);
+					return;
+				}
 				const file_left = file.size - start;
 				const length = Math.min(FileChunkSize, file_left);
 				const file_path = path.resolve(
 					`./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}/${request.Hash}`,
 				);
 				try {
-					const buffer = await fsp.readFile(file_path, null, {
-						start,
-						end: start + length - 1,
-					});
-					const chunk = Uint8Array.from(buffer);
-					const nonce = Uint32ToBuffer(request.Nonce);
-					SendMessage(from, Buffer.concat([nonce, chunk]));
+					// fsp.readFile does NOT support {start, end} options - use fsp.open + fd.read instead
+					const fd = await fsp.open(file_path, "r");
+					try {
+						const buffer = Buffer.alloc(length);
+						await fd.read(buffer, 0, length, start);
+						const chunk = Uint8Array.from(buffer);
+						const nonce = Uint32ToBuffer(request.Nonce);
+						SendMessage(from, Buffer.concat([nonce, chunk]));
+					} finally {
+						await fd.close();
+					}
 				} catch (err) {
 					ConsoleError(err);
 				}
