@@ -1,915 +1,1030 @@
-import { ActionCode, MessageObjectType, ObjectType, MessageCode } from './msg_const.js'
+import {
+	ActionCode,
+	MessageObjectType,
+	ObjectType,
+	MessageCode,
+} from "./msg_const.js";
 
 // Action>>>declare
 // URL for server declare
 const DeclareSchema = {
-  "type": "object",
-  "required": ["Action", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 5,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.Declare },
-    "URL": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 5,
+	properties: {
+		Action: { type: "number", const: ActionCode.Declare },
+		URL: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // ***file***
 const FileRequestSchema = {
-  "type": "object",
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.FileRequest },
-    "FileType": { "type": "number" },
-    "To": { "type": "string" },
-    "GroupHash": { "type": "string" },
-    "Hash": { "type": "string" },
-    "Nonce": { "type": "number" },
-    "ChunkCursor": { "type": "number" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  },
-  "allOf": [
-    { "required": ["Action", "FileType", "Hash", "Nonce", "ChunkCursor", "Timestamp", "PublicKey", "Signature"] },
-    {
-      "oneOf": [
-        {
-          "not": {
-            "anyOf": [
-              { "required": ["To"] },
-              { "required": ["GroupHash"] }
-            ]
-          }
-        },
-        { "required": ["To"] },
-        { "required": ["GroupHash"] }
-      ]
-    }
-  ],
-  "additionalProperties": false
-}
+	type: "object",
+	properties: {
+		Action: { type: "number", const: ActionCode.FileRequest },
+		FileType: { type: "number" },
+		To: { type: "string" },
+		GroupHash: { type: "string" },
+		Hash: { type: "string" },
+		Nonce: { type: "number" },
+		ChunkCursor: { type: "number" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+	allOf: [
+		{
+			required: [
+				"Action",
+				"FileType",
+				"Hash",
+				"Nonce",
+				"ChunkCursor",
+				"Timestamp",
+				"PublicKey",
+				"Signature",
+			],
+		},
+		{
+			oneOf: [
+				{
+					not: {
+						anyOf: [{ required: ["To"] }, { required: ["GroupHash"] }],
+					},
+				},
+				{ required: ["To"] },
+				{ required: ["GroupHash"] },
+			],
+		},
+	],
+	additionalProperties: false,
+};
 
 // ***avatar***
 const AvatarRequestSchema = {
-  "type": "object",
-  "required": ["Action", "List", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 5,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.AvatarRequest },
-    "List": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 64,
-      "items": {
-        "type": "object",
-        "required": ["Address", "SignedAt"],
-        "maxProperties": 2,
-        "properties": {
-          "Address": { "type": "string" },
-          "SignedAt": { "type": "number" }
-        }
-      }
-    },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "List", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 5,
+	properties: {
+		Action: { type: "number", const: ActionCode.AvatarRequest },
+		List: {
+			type: "array",
+			minItems: 1,
+			maxItems: 64,
+			items: {
+				type: "object",
+				required: ["Address", "SignedAt"],
+				maxProperties: 2,
+				properties: {
+					Address: { type: "string" },
+					SignedAt: { type: "number" },
+				},
+			},
+		},
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 const AvatarSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Hash", "Size", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 9,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.Avatar },
-    "Hash": { "type": "string" },
-    "Size": { "type": "number" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"ObjectType",
+		"Hash",
+		"Size",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 9,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.Avatar },
+		Hash: { type: "string" },
+		Size: { type: "number" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 const AvatarListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "List"],
-  "maxProperties": 2,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.AvatarList },
-    "List": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 64,
-      "items": {
-        "type": "object",
-        "required": ["ObjectType", "Hash", "Size", "Timestamp", "PublicKey", "Signature"],
-        "maxProperties": 6,
-        "properties": {
-          "ObjectType": { "type": "number", "const": ObjectType.Avatar },
-          "Hash": { "type": "string" },
-          "Size": { "type": "number" },
-          "Timestamp": { "type": "number" },
-          "PublicKey": { "type": "string" },
-          "Signature": { "type": "string" }
-        }
-      }
-    }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "List"],
+	maxProperties: 2,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.AvatarList },
+		List: {
+			type: "array",
+			minItems: 1,
+			maxItems: 64,
+			items: {
+				type: "object",
+				required: [
+					"ObjectType",
+					"Hash",
+					"Size",
+					"Timestamp",
+					"PublicKey",
+					"Signature",
+				],
+				maxProperties: 6,
+				properties: {
+					ObjectType: { type: "number", const: ObjectType.Avatar },
+					Hash: { type: "string" },
+					Size: { type: "number" },
+					Timestamp: { type: "number" },
+					PublicKey: { type: "string" },
+					Signature: { type: "string" },
+				},
+			},
+		},
+	},
+};
 
 // ***bulletin***
 // Shared bulletin item schema -- used by BulletinSchema and all Bulletin list item definitions
 const BulletinItemProperties = {
-  "required": ["ObjectType", "Sequence", "PreHash", "Content", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 10,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.Bulletin },
-    "Sequence": { "type": "number" },
-    "PreHash": { "type": "string" },
-    "Content": { "type": "string" },
-    "Tag": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "items": { "type": "string" }
-    },
-    "Quote": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "items": {
-        "type": "object",
-        "required": ["Address", "Sequence", "Hash"],
-        "properties": {
-          "Address": { "type": "string" },
-          "Sequence": { "type": "number" },
-          "Hash": { "type": "string" }
-        }
-      }
-    },
-    "File": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "items": {
-        "type": "object",
-        "required": ["Name", "Ext", "Size", "Hash"],
-        "properties": {
-          "Name": { "type": "string" },
-          "Ext": { "type": "string" },
-          "Size": { "type": "number" },
-          "Hash": { "type": "string" }
-        }
-      }
-    },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	required: [
+		"ObjectType",
+		"Sequence",
+		"PreHash",
+		"Content",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 10,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.Bulletin },
+		Sequence: { type: "number" },
+		PreHash: { type: "string" },
+		Content: { type: "string" },
+		Tag: {
+			type: "array",
+			minItems: 1,
+			maxItems: 16,
+			items: { type: "string" },
+		},
+		Quote: {
+			type: "array",
+			minItems: 1,
+			maxItems: 16,
+			items: {
+				type: "object",
+				required: ["Address", "Sequence", "Hash"],
+				properties: {
+					Address: { type: "string" },
+					Sequence: { type: "number" },
+					Hash: { type: "string" },
+				},
+			},
+		},
+		File: {
+			type: "array",
+			minItems: 1,
+			maxItems: 16,
+			items: {
+				type: "object",
+				required: ["Name", "Ext", "Size", "Hash"],
+				properties: {
+					Name: { type: "string" },
+					Ext: { type: "string" },
+					Size: { type: "number" },
+					Hash: { type: "string" },
+				},
+			},
+		},
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>Bulletin
 const BulletinSchema = {
-  "type": "object",
-  ...BulletinItemProperties
-}
+	type: "object",
+	...BulletinItemProperties,
+};
 
 // Shared bulletin list item schema -- referenced by Reply/Tag/Random bulletin lists
 const BulletinListItemSchema = {
-  "type": "object",
-  ...BulletinItemProperties
-}
+	type: "object",
+	...BulletinItemProperties,
+};
 
 // Action>>>
 // Client <=> Server
 const BulletinRequestSchema = {
-  "type": "object",
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.BulletinRequest },
-    "Hash": { "type": "string" },
-    "Address": { "type": "string" },
-    "Sequence": { "type": "number" },
-    "To": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  },
-  "allOf": [
-    { "required": ["Action", "To", "Timestamp", "PublicKey", "Signature"] },
-    {
-      "oneOf": [
-        { "required": ["Hash"] },
-        { "required": ["Address", "Sequence"] }
-      ]
-    }
-  ],
-  "additionalProperties": false
-}
+	type: "object",
+	properties: {
+		Action: { type: "number", const: ActionCode.BulletinRequest },
+		Hash: { type: "string" },
+		Address: { type: "string" },
+		Sequence: { type: "number" },
+		To: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+	allOf: [
+		{ required: ["Action", "To", "Timestamp", "PublicKey", "Signature"] },
+		{
+			oneOf: [{ required: ["Hash"] }, { required: ["Address", "Sequence"] }],
+		},
+	],
+	additionalProperties: false,
+};
 
 // Action>>>
 // Client => Server
 const BulletinSubscribeSchema = {
-  "type": "object",
-  "required": ["Action", "List", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 5,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.BulletinSubscribe },
-    "List": {
-      "type": "array",
-      "minItems": 0,
-      "maxItems": 64,
-      "items": { "type": "string" }
-    },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "List", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 5,
+	properties: {
+		Action: { type: "number", const: ActionCode.BulletinSubscribe },
+		List: {
+			type: "array",
+			minItems: 0,
+			maxItems: 64,
+			items: { type: "string" },
+		},
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Action>>>
 // Client => Server
 const RandomBulletinRequestSchema = {
-  "type": "object",
-  "required": ["Action", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 4,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.RandomBulletinRequest },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 4,
+	properties: {
+		Action: { type: "number", const: ActionCode.RandomBulletinRequest },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Action>>>
 // Client => Server
 // BulletinCount DESC
 const ServerAddressRequestSchema = {
-  "type": "object",
-  "required": ["Action", "Page", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 6,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.ServerAddressRequest },
-    "Page": { "type": "number" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "Page", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 6,
+	properties: {
+		Action: { type: "number", const: ActionCode.ServerAddressRequest },
+		Page: { type: "number" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>
 // Server => Client
 const ServerAddressListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Page", "TotalPage", "List"],
-  "maxProperties": 4,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.ServerAddressList },
-    "Page": { "type": "number" },
-    "TotalPage": { "type": "number" },
-    "List": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["Address", "Count"],
-        "maxProperties": 2,
-        "properties": {
-          "Address": { "type": "string" },
-          "Count": { "type": "number" }
-        }
-      }
-    }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Page", "TotalPage", "List"],
+	maxProperties: 4,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.ServerAddressList },
+		Page: { type: "number" },
+		TotalPage: { type: "number" },
+		List: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["Address", "Count"],
+				maxProperties: 2,
+				properties: {
+					Address: { type: "string" },
+					Count: { type: "number" },
+				},
+			},
+		},
+	},
+};
 
 // Action>>>
 // Client => Server
 const ReplyBulletinRequestSchema = {
-  "type": "object",
-  "required": ["Action", "Hash", "Page", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 6,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.ReplyBulletinRequest },
-    "Hash": { "type": "string" },
-    "Page": { "type": "number" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "Hash", "Page", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 6,
+	properties: {
+		Action: { type: "number", const: ActionCode.ReplyBulletinRequest },
+		Hash: { type: "string" },
+		Page: { type: "number" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>
 // Server => Client
 // Timestamp ASC
 const ReplyBulletinListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Hash", "Page", "TotalPage", "List"],
-  "maxProperties": 5,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.ReplyBulletinList },
-    "Hash": { "type": "string" },
-    "Page": { "type": "number" },
-    "TotalPage": { "type": "number" },
-    "List": {
-      "type": "array",
-      "items": BulletinListItemSchema
-    }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Hash", "Page", "TotalPage", "List"],
+	maxProperties: 5,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.ReplyBulletinList },
+		Hash: { type: "string" },
+		Page: { type: "number" },
+		TotalPage: { type: "number" },
+		List: {
+			type: "array",
+			items: BulletinListItemSchema,
+		},
+	},
+};
 
 // Action>>>
 // Client => Server
 const TagBulletinRequestSchema = {
-  "type": "object",
-  "required": ["Action", "Tag", "Page", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 6,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.TagBulletinRequest },
-    "Tag": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "items": { "type": "string" }
-    },
-    "Page": { "type": "number" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "Tag", "Page", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 6,
+	properties: {
+		Action: { type: "number", const: ActionCode.TagBulletinRequest },
+		Tag: {
+			type: "array",
+			minItems: 1,
+			maxItems: 16,
+			items: { type: "string" },
+		},
+		Page: { type: "number" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>
 // Server => Client
 // Timestamp DESC
 const TagBulletinListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Tag", "Page", "TotalPage", "List"],
-  "maxProperties": 5,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.TagBulletinList },
-    "Tag": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "items": { "type": "string" }
-    },
-    "Page": { "type": "number" },
-    "TotalPage": { "type": "number" },
-    "List": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["ObjectType", "Sequence", "PreHash", "Content", "Timestamp", "PublicKey", "Signature"],
-        "maxProperties": 10,
-        "properties": {
-          "ObjectType": { "type": "number", "const": ObjectType.Bulletin },
-          "Sequence": { "type": "number" },
-          "PreHash": { "type": "string" },
-          "Content": { "type": "string" },
-          "Tag": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": { "type": "string" }
-          },
-          "Quote": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "required": ["Address", "Sequence", "Hash"],
-              "properties": {
-                "Address": { "type": "string" },
-                "Sequence": { "type": "number" },
-                "Hash": { "type": "string" }
-              }
-            }
-          },
-          "File": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "required": ["Name", "Ext", "Size", "Hash"],
-              "properties": {
-                "Name": { "type": "string" },
-                "Ext": { "type": "string" },
-                "Size": { "type": "number" },
-                "Hash": { "type": "string" }
-              }
-            }
-          },
-          "Timestamp": { "type": "number" },
-          "PublicKey": { "type": "string" },
-          "Signature": { "type": "string" }
-        }
-      }
-    }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Tag", "Page", "TotalPage", "List"],
+	maxProperties: 5,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.TagBulletinList },
+		Tag: {
+			type: "array",
+			minItems: 1,
+			maxItems: 16,
+			items: { type: "string" },
+		},
+		Page: { type: "number" },
+		TotalPage: { type: "number" },
+		List: {
+			type: "array",
+			items: {
+				type: "object",
+				required: [
+					"ObjectType",
+					"Sequence",
+					"PreHash",
+					"Content",
+					"Timestamp",
+					"PublicKey",
+					"Signature",
+				],
+				maxProperties: 10,
+				properties: {
+					ObjectType: { type: "number", const: ObjectType.Bulletin },
+					Sequence: { type: "number" },
+					PreHash: { type: "string" },
+					Content: { type: "string" },
+					Tag: {
+						type: "array",
+						minItems: 1,
+						maxItems: 16,
+						items: { type: "string" },
+					},
+					Quote: {
+						type: "array",
+						minItems: 1,
+						maxItems: 16,
+						items: {
+							type: "object",
+							required: ["Address", "Sequence", "Hash"],
+							properties: {
+								Address: { type: "string" },
+								Sequence: { type: "number" },
+								Hash: { type: "string" },
+							},
+						},
+					},
+					File: {
+						type: "array",
+						minItems: 1,
+						maxItems: 16,
+						items: {
+							type: "object",
+							required: ["Name", "Ext", "Size", "Hash"],
+							properties: {
+								Name: { type: "string" },
+								Ext: { type: "string" },
+								Size: { type: "number" },
+								Hash: { type: "string" },
+							},
+						},
+					},
+					Timestamp: { type: "number" },
+					PublicKey: { type: "string" },
+					Signature: { type: "string" },
+				},
+			},
+		},
+	},
+};
 
 // Object>>>
 // Server => Client
 const RandomBulletinListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "List"],
-  "maxProperties": 2,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.RandomBulletinList },
-    "List": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["ObjectType", "Sequence", "PreHash", "Content", "Timestamp", "PublicKey", "Signature"],
-        "maxProperties": 10,
-        "properties": {
-          "ObjectType": { "type": "number", "const": ObjectType.Bulletin },
-          "Sequence": { "type": "number" },
-          "PreHash": { "type": "string" },
-          "Content": { "type": "string" },
-          "Tag": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": { "type": "string" }
-          },
-          "Quote": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "required": ["Address", "Sequence", "Hash"],
-              "properties": {
-                "Address": { "type": "string" },
-                "Sequence": { "type": "number" },
-                "Hash": { "type": "string" }
-              }
-            }
-          },
-          "File": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "required": ["Name", "Ext", "Size", "Hash"],
-              "properties": {
-                "Name": { "type": "string" },
-                "Ext": { "type": "string" },
-                "Size": { "type": "number" },
-                "Hash": { "type": "string" }
-              }
-            }
-          },
-          "Timestamp": { "type": "number" },
-          "PublicKey": { "type": "string" },
-          "Signature": { "type": "string" }
-        }
-      }
-    }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "List"],
+	maxProperties: 2,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.RandomBulletinList },
+		List: {
+			type: "array",
+			items: {
+				type: "object",
+				required: [
+					"ObjectType",
+					"Sequence",
+					"PreHash",
+					"Content",
+					"Timestamp",
+					"PublicKey",
+					"Signature",
+				],
+				maxProperties: 10,
+				properties: {
+					ObjectType: { type: "number", const: ObjectType.Bulletin },
+					Sequence: { type: "number" },
+					PreHash: { type: "string" },
+					Content: { type: "string" },
+					Tag: {
+						type: "array",
+						minItems: 1,
+						maxItems: 16,
+						items: { type: "string" },
+					},
+					Quote: {
+						type: "array",
+						minItems: 1,
+						maxItems: 16,
+						items: {
+							type: "object",
+							required: ["Address", "Sequence", "Hash"],
+							properties: {
+								Address: { type: "string" },
+								Sequence: { type: "number" },
+								Hash: { type: "string" },
+							},
+						},
+					},
+					File: {
+						type: "array",
+						minItems: 1,
+						maxItems: 16,
+						items: {
+							type: "object",
+							required: ["Name", "Ext", "Size", "Hash"],
+							properties: {
+								Name: { type: "string" },
+								Ext: { type: "string" },
+								Size: { type: "number" },
+								Hash: { type: "string" },
+							},
+						},
+					},
+					Timestamp: { type: "number" },
+					PublicKey: { type: "string" },
+					Signature: { type: "string" },
+				},
+			},
+		},
+	},
+};
 
 // ***chat***
 // Object>>>Chat Handshake
 const ECDHHandshakeSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Partition", "Sequence", "Self", "Pair", "To", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 9,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.ECDH },
-    "Partition": { "type": "number" },
-    "Sequence": { "type": "number" },
-    "Self": { "type": "string" },
-    "Pair": { "type": "string" },
-    "To": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"ObjectType",
+		"Partition",
+		"Sequence",
+		"Self",
+		"Pair",
+		"To",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 9,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.ECDH },
+		Partition: { type: "number" },
+		Sequence: { type: "number" },
+		Self: { type: "string" },
+		Pair: { type: "string" },
+		To: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // ***private***
 // Object>>>PrivateMessage
 const PrivateMessageSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Sequence", "PreHash", "Content", "To", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 9,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.PrivateMessage },
-    "Sequence": { "type": "number" },
-    "PreHash": { "type": "string" },
-    "Confirm": {
-      "type": "object",
-      "required": ["Sequence", "Hash"],
-      "maxProperties": 2,
-      "properties": {
-        "Sequence": { "type": "number" },
-        "Hash": { "type": "string" }
-      }
-    },
-    "Content": { "type": "string" },
-    "To": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"ObjectType",
+		"Sequence",
+		"PreHash",
+		"Content",
+		"To",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 9,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.PrivateMessage },
+		Sequence: { type: "number" },
+		PreHash: { type: "string" },
+		Confirm: {
+			type: "object",
+			required: ["Sequence", "Hash"],
+			maxProperties: 2,
+			properties: {
+				Sequence: { type: "number" },
+				Hash: { type: "string" },
+			},
+		},
+		Content: { type: "string" },
+		To: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Action>>>
 const PrivateMessageSyncSchema = {
-  "type": "object",
-  "required": ["Action", "To", "PairSequence", "SelfSequence", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 7,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.PrivateMessageSync },
-    "To": { "type": "string" },
-    "PairSequence": { "type": "number" },
-    "SelfSequence": { "type": "number" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"Action",
+		"To",
+		"PairSequence",
+		"SelfSequence",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 7,
+	properties: {
+		Action: { type: "number", const: ActionCode.PrivateMessageSync },
+		To: { type: "string" },
+		PairSequence: { type: "number" },
+		SelfSequence: { type: "number" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // ***group***
 // Action>>>
 const GroupSyncSchema = {
-  "type": "object",
-  "required": ["Action", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 4,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.GroupSync },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["Action", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 4,
+	properties: {
+		Action: { type: "number", const: ActionCode.GroupSync },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 const GroupMessageSyncSchema = {
-  "type": "object",
-  "required": ["Action", "Hash", "Address", "Sequence", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 8,
-  "properties": {
-    "Action": { "type": "number", "const": ActionCode.GroupMessageSync },
-    "Hash": { "type": "string" },
-    "Address": { "type": "string" },
-    "Sequence": { "type": "number" },
-    "To": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"Action",
+		"Hash",
+		"Address",
+		"Sequence",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 8,
+	properties: {
+		Action: { type: "number", const: ActionCode.GroupMessageSync },
+		Hash: { type: "string" },
+		Address: { type: "string" },
+		Sequence: { type: "number" },
+		To: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>
 const GroupListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "List"],
-  "maxProperties": 2,
-  "properties": {
-    "ObjectType": {
-      "type": "number",
-      "const": ObjectType.GroupList
-    },
-    "List": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 64,
-      "items": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": ["ObjectType", "Hash", "Name", "Member", "Timestamp", "PublicKey", "Signature"],
-            "maxProperties": 7,
-            "properties": {
-              "ObjectType": {
-                "type": "number",
-                "const": ObjectType.GroupCreate
-              },
-              "Hash": { "type": "string" },
-              "Name": { "type": "string" },
-              "Member": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 16,
-                "items": { "type": "string" }
-              },
-              "Timestamp": { "type": "number" },
-              "PublicKey": { "type": "string" },
-              "Signature": { "type": "string" }
-            }
-          },
-          {
-            "type": "object",
-            "required": ["ObjectType", "Hash", "Timestamp", "PublicKey", "Signature"],
-            "maxProperties": 5,
-            "properties": {
-              "ObjectType": { "type": "number", "const": ObjectType.GroupDelete },
-              "Hash": { "type": "string" },
-              "Timestamp": { "type": "number" },
-              "PublicKey": { "type": "string" },
-              "Signature": { "type": "string" }
-            }
-          }
-        ]
-      }
-    },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "List"],
+	maxProperties: 2,
+	properties: {
+		ObjectType: {
+			type: "number",
+			const: ObjectType.GroupList,
+		},
+		List: {
+			type: "array",
+			minItems: 1,
+			maxItems: 64,
+			items: {
+				oneOf: [
+					{
+						type: "object",
+						required: [
+							"ObjectType",
+							"Hash",
+							"Name",
+							"Member",
+							"Timestamp",
+							"PublicKey",
+							"Signature",
+						],
+						maxProperties: 7,
+						properties: {
+							ObjectType: {
+								type: "number",
+								const: ObjectType.GroupCreate,
+							},
+							Hash: { type: "string" },
+							Name: { type: "string" },
+							Member: {
+								type: "array",
+								minItems: 2,
+								maxItems: 16,
+								items: { type: "string" },
+							},
+							Timestamp: { type: "number" },
+							PublicKey: { type: "string" },
+							Signature: { type: "string" },
+						},
+					},
+					{
+						type: "object",
+						required: [
+							"ObjectType",
+							"Hash",
+							"Timestamp",
+							"PublicKey",
+							"Signature",
+						],
+						maxProperties: 5,
+						properties: {
+							ObjectType: { type: "number", const: ObjectType.GroupDelete },
+							Hash: { type: "string" },
+							Timestamp: { type: "number" },
+							PublicKey: { type: "string" },
+							Signature: { type: "string" },
+						},
+					},
+				],
+			},
+		},
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>GroupCreate
 const GroupCreateSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Hash", "Name", "Member", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 7,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.GroupCreate },
-    "Hash": { "type": "string" },
-    "Name": { "type": "string" },
-    "Member": {
-      "type": "array",
-      "minItems": 2,
-      "maxItems": 16,
-      "items": { "type": "string" }
-    },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"ObjectType",
+		"Hash",
+		"Name",
+		"Member",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 7,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.GroupCreate },
+		Hash: { type: "string" },
+		Name: { type: "string" },
+		Member: {
+			type: "array",
+			minItems: 2,
+			maxItems: 16,
+			items: { type: "string" },
+		},
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>GroupDelete
 const GroupDeleteSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Hash", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 5,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.GroupDelete },
-    "Hash": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Hash", "Timestamp", "PublicKey", "Signature"],
+	maxProperties: 5,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.GroupDelete },
+		Hash: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>GroupMessage
 const GroupMessageSchema = {
-  "type": "object",
-  "required": ["ObjectType", "GroupHash", "Sequence", "PreHash", "Content", "To", "Timestamp", "PublicKey", "Signature"],
-  "maxProperties": 10,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.GroupMessage },
-    "GroupHash": { "type": "string" },
-    "Sequence": { "type": "number" },
-    "PreHash": { "type": "string" },
-    "Confirm": {
-      "type": "object",
-      "required": ["Address", "Sequence", "Hash"],
-      "maxProperties": 2,
-      "properties": {
-        "Address": { "type": "string" },
-        "Sequence": { "type": "number" },
-        "Hash": { "type": "string" }
-      }
-    },
-    "Content": { "type": "string" },
-    "To": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "Signature": { "type": "string" }
-  }
-}
+	type: "object",
+	required: [
+		"ObjectType",
+		"GroupHash",
+		"Sequence",
+		"PreHash",
+		"Content",
+		"To",
+		"Timestamp",
+		"PublicKey",
+		"Signature",
+	],
+	maxProperties: 10,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.GroupMessage },
+		GroupHash: { type: "string" },
+		Sequence: { type: "number" },
+		PreHash: { type: "string" },
+		Confirm: {
+			type: "object",
+			required: ["Address", "Sequence", "Hash"],
+			maxProperties: 2,
+			properties: {
+				Address: { type: "string" },
+				Sequence: { type: "number" },
+				Hash: { type: "string" },
+			},
+		},
+		Content: { type: "string" },
+		To: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		Signature: { type: "string" },
+	},
+};
 
 // Object>>>GroupMessageList
 const GroupMessageListSchema = {
-  "type": "object",
-  "required": ["ObjectType", "GroupHash", "To", "Timestamp", "PublicKey", "List"],
-  "maxProperties": 6,
-  "properties": {
-    "ObjectType": { "type": "number", "const": ObjectType.GroupMessageList },
-    "GroupHash": { "type": "string" },
-    "To": { "type": "string" },
-    "Timestamp": { "type": "number" },
-    "PublicKey": { "type": "string" },
-    "List": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 64,
-      "items": {
-        "type": "object",
-        "required": ["Sequence", "PreHash", "Content", "Timestamp", "PublicKey", "Signature"],
-        "maxProperties": 7,
-        "properties": {
-          "Sequence": { "type": "number" },
-          "PreHash": { "type": "string" },
-          "Confirm": {
-            "type": "object",
-            "required": ["Address", "Sequence", "Hash"],
-            "maxProperties": 3,
-            "properties": {
-              "Address": { "type": "string" },
-              "Sequence": { "type": "number" },
-              "Hash": { "type": "string" }
-            }
-          },
-          "Content": { "type": "string" },
-          "Timestamp": { "type": "number" },
-          "PublicKey": { "type": "string" },
-          "Signature": { "type": "string" }
-        }
-      }
-    }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "GroupHash", "To", "Timestamp", "PublicKey", "List"],
+	maxProperties: 6,
+	properties: {
+		ObjectType: { type: "number", const: ObjectType.GroupMessageList },
+		GroupHash: { type: "string" },
+		To: { type: "string" },
+		Timestamp: { type: "number" },
+		PublicKey: { type: "string" },
+		List: {
+			type: "array",
+			minItems: 1,
+			maxItems: 64,
+			items: {
+				type: "object",
+				required: [
+					"Sequence",
+					"PreHash",
+					"Content",
+					"Timestamp",
+					"PublicKey",
+					"Signature",
+				],
+				maxProperties: 7,
+				properties: {
+					Sequence: { type: "number" },
+					PreHash: { type: "string" },
+					Confirm: {
+						type: "object",
+						required: ["Address", "Sequence", "Hash"],
+						maxProperties: 3,
+						properties: {
+							Address: { type: "string" },
+							Sequence: { type: "number" },
+							Hash: { type: "string" },
+						},
+					},
+					Content: { type: "string" },
+					Timestamp: { type: "number" },
+					PublicKey: { type: "string" },
+					Signature: { type: "string" },
+				},
+			},
+		},
+	},
+};
 
 // Message Object
 const MessageObjectBulletinSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Address", "Sequence", "Hash"],
-  "maxProperties": 4,
-  "properties": {
-    "ObjectType": { "type": "number", "const": MessageObjectType.Bulletin },
-    "Address": { "type": "string" },
-    "Sequence": { "type": "number" },
-    "Hash": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Address", "Sequence", "Hash"],
+	maxProperties: 4,
+	properties: {
+		ObjectType: { type: "number", const: MessageObjectType.Bulletin },
+		Address: { type: "string" },
+		Sequence: { type: "number" },
+		Hash: { type: "string" },
+	},
+};
 
 const MessageObjectPrivateChatFileSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Name", "Ext", "Size", "Hash"],
-  "maxProperties": 7,
-  "properties": {
-    "ObjectType": { "type": "number", "const": MessageObjectType.PrivateChatFile },
-    "Name": { "type": "string" },
-    "Ext": { "type": "string" },
-    "Size": { "type": "number" },
-    "Hash": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Name", "Ext", "Size", "Hash"],
+	maxProperties: 7,
+	properties: {
+		ObjectType: { type: "number", const: MessageObjectType.PrivateChatFile },
+		Name: { type: "string" },
+		Ext: { type: "string" },
+		Size: { type: "number" },
+		Hash: { type: "string" },
+	},
+};
 
 const MessageObjectGroupChatFileSchema = {
-  "type": "object",
-  "required": ["ObjectType", "Name", "Ext", "Size", "Hash"],
-  "maxProperties": 7,
-  "properties": {
-    "ObjectType": { "type": "number", "const": MessageObjectType.GroupChatFile },
-    "Name": { "type": "string" },
-    "Ext": { "type": "string" },
-    "Size": { "type": "number" },
-    "Hash": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["ObjectType", "Name", "Ext", "Size", "Hash"],
+	maxProperties: 7,
+	properties: {
+		ObjectType: { type: "number", const: MessageObjectType.GroupChatFile },
+		Name: { type: "string" },
+		Ext: { type: "string" },
+		Size: { type: "number" },
+		Hash: { type: "string" },
+	},
+};
 
 // === Control-Plane Schemas (unsigned) ===
 
 // Generic error notification: { ActionCode: 800, MessageCode: 701-704, ErrorMessage }
 const ServerNotifyErrorSchema = {
-  "type": "object",
-  "required": ["ActionCode", "MessageCode", "ErrorMessage"],
-  "maxProperties": 3,
-  "properties": {
-    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
-    "MessageCode": {
-      "type": "number",
-      "enum": [
-        MessageCode.JsonSchemaInvalid,
-        MessageCode.SignatureInvalid,
-        MessageCode.TimestampInvalid,
-        MessageCode.AddressMismatch
-      ]
-    },
-    "ErrorMessage": { "type": "string" }
-  }
-}
+	type: "object",
+	required: ["ActionCode", "MessageCode", "ErrorMessage"],
+	maxProperties: 3,
+	properties: {
+		ActionCode: { type: "number", const: ActionCode.ServerNotify },
+		MessageCode: {
+			type: "number",
+			enum: [
+				MessageCode.JsonSchemaInvalid,
+				MessageCode.SignatureInvalid,
+				MessageCode.TimestampInvalid,
+				MessageCode.AddressMismatch,
+			],
+		},
+		ErrorMessage: { type: "string" },
+	},
+};
 
 // Generic notification: { ActionCode: 800, MessageCode: 710-712, ...optional fields }
 const ServerNotifyInfoSchema = {
-  "type": "object",
-  "required": ["ActionCode", "MessageCode"],
-  "properties": {
-    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
-    "MessageCode": {
-      "type": "number",
-      "enum": [
-        MessageCode.KickedByNewConn,
-        MessageCode.ServerShutdown,
-        MessageCode.SyncComplete
-      ]
-    },
-    "ErrorMessage": { "type": "string" }
-  },
-  "additionalProperties": false
-}
+	type: "object",
+	required: ["ActionCode", "MessageCode"],
+	properties: {
+		ActionCode: { type: "number", const: ActionCode.ServerNotify },
+		MessageCode: {
+			type: "number",
+			enum: [
+				MessageCode.KickedByNewConn,
+				MessageCode.ServerShutdown,
+				MessageCode.SyncComplete,
+			],
+		},
+		ErrorMessage: { type: "string" },
+	},
+	additionalProperties: false,
+};
 
 // Cache success confirmation: { ActionCode: 800, MessageCode: 720/721/723 }
 const ServerNotifyCacheSchema = {
-  "type": "object",
-  "required": ["ActionCode", "MessageCode"],
-  "maxProperties": 2,
-  "properties": {
-    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
-    "MessageCode": {
-      "type": "number",
-      "enum": [
-        MessageCode.BulletinCached,
-        MessageCode.PrivateMsgCached,
-        MessageCode.HandshakeCached
-      ]
-    }
-  }
-}
+	type: "object",
+	required: ["ActionCode", "MessageCode"],
+	maxProperties: 2,
+	properties: {
+		ActionCode: { type: "number", const: ActionCode.ServerNotify },
+		MessageCode: {
+			type: "number",
+			enum: [
+				MessageCode.BulletinCached,
+				MessageCode.PrivateMsgCached,
+				MessageCode.HandshakeCached,
+			],
+		},
+	},
+};
 
 // File transfer progress: { ActionCode: 800, MessageCode: 730-732, Hash, ProgressInfo }
 const ServerNotifyFileProgressSchema = {
-  "type": "object",
-  "required": ["ActionCode", "MessageCode"],
-  "properties": {
-    "ActionCode": { "type": "number", "const": ActionCode.ServerNotify },
-    "MessageCode": {
-      "type": "number",
-      "enum": [
-        MessageCode.FileChunkReceived,
-        MessageCode.FileTransferComplete,
-        MessageCode.FileTransferFailed
-      ]
-    },
-    "Hash": { "type": "string" },
-    "ProgressInfo": {
-      "type": "object",
-      "properties": {
-        "ReceivedBytes": { "type": "number" },
-        "TotalBytes": { "type": "number" }
-      }
-    }
-  }
-}
+	type: "object",
+	required: ["ActionCode", "MessageCode"],
+	properties: {
+		ActionCode: { type: "number", const: ActionCode.ServerNotify },
+		MessageCode: {
+			type: "number",
+			enum: [
+				MessageCode.FileChunkReceived,
+				MessageCode.FileTransferComplete,
+				MessageCode.FileTransferFailed,
+			],
+		},
+		Hash: { type: "string" },
+		ProgressInfo: {
+			type: "object",
+			properties: {
+				ReceivedBytes: { type: "number" },
+				TotalBytes: { type: "number" },
+			},
+		},
+	},
+};
 
 // Client ACK: { ActionCode: 810, AckFor }
 const ClientAckSchema = {
-  "type": "object",
-  "required": ["ActionCode", "AckFor"],
-  "maxProperties": 2,
-  "properties": {
-    "ActionCode": { "type": "number", "const": ActionCode.ClientAck },
-    "AckFor": { "type": "number" }
-  }
-}
+	type: "object",
+	required: ["ActionCode", "AckFor"],
+	maxProperties: 2,
+	properties: {
+		ActionCode: { type: "number", const: ActionCode.ClientAck },
+		AckFor: { type: "number" },
+	},
+};
 
 export {
-  DeclareSchema,
-  FileRequestSchema,
-
-  // Avatar
-  AvatarRequestSchema,
-  AvatarSchema,
-  AvatarListSchema,
-
-  // Bulletin
-  BulletinSchema,
-  BulletinSubscribeSchema,
-  BulletinRequestSchema,
-  ServerAddressRequestSchema,
-  ServerAddressListSchema,
-  ReplyBulletinRequestSchema,
-  ReplyBulletinListSchema,
-  TagBulletinRequestSchema,
-  TagBulletinListSchema,
-  RandomBulletinRequestSchema,
-  RandomBulletinListSchema,
-
-  // Chat Handshake
-  ECDHHandshakeSchema,
-
-  // Private
-  PrivateMessageSchema,
-  PrivateMessageSyncSchema,
-
-  // Group
-  GroupSyncSchema,
-  GroupMessageSyncSchema,
-  GroupListSchema,
-  GroupCreateSchema,
-  GroupDeleteSchema,
-  GroupMessageSchema,
-  GroupMessageListSchema,
-
-  // Message Object
-  MessageObjectBulletinSchema,
-  MessageObjectPrivateChatFileSchema,
-  MessageObjectGroupChatFileSchema,
-
-  // Control-Plane
-  ServerNotifyErrorSchema,
-  ServerNotifyInfoSchema,
-  ServerNotifyCacheSchema,
-  ServerNotifyFileProgressSchema,
-  ClientAckSchema
-}
+	DeclareSchema,
+	FileRequestSchema,
+	// Avatar
+	AvatarRequestSchema,
+	AvatarSchema,
+	AvatarListSchema,
+	// Bulletin
+	BulletinSchema,
+	BulletinSubscribeSchema,
+	BulletinRequestSchema,
+	ServerAddressRequestSchema,
+	ServerAddressListSchema,
+	ReplyBulletinRequestSchema,
+	ReplyBulletinListSchema,
+	TagBulletinRequestSchema,
+	TagBulletinListSchema,
+	RandomBulletinRequestSchema,
+	RandomBulletinListSchema,
+	// Chat Handshake
+	ECDHHandshakeSchema,
+	// Private
+	PrivateMessageSchema,
+	PrivateMessageSyncSchema,
+	// Group
+	GroupSyncSchema,
+	GroupMessageSyncSchema,
+	GroupListSchema,
+	GroupCreateSchema,
+	GroupDeleteSchema,
+	GroupMessageSchema,
+	GroupMessageListSchema,
+	// Message Object
+	MessageObjectBulletinSchema,
+	MessageObjectPrivateChatFileSchema,
+	MessageObjectGroupChatFileSchema,
+	// Control-Plane
+	ServerNotifyErrorSchema,
+	ServerNotifyInfoSchema,
+	ServerNotifyCacheSchema,
+	ServerNotifyFileProgressSchema,
+	ClientAckSchema,
+};
