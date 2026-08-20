@@ -113,6 +113,18 @@ const subscribeMap = {};
 /** Track which addresses have already had N+1 confirmation sent during Declare-triggered sync */
 const syncConfirmSent = {};
 
+/**
+ * Throttle for PrivateMessageSync: detects a client-side sync loop. If the same
+ * (from, to) pair re-sends the IDENTICAL (SelfSequence, PairSequence) request more
+ * than PRIVATE_SYNC_MAX times within PRIVATE_SYNC_WINDOW_MS, it is a loop (the
+ * client's local state never advances) — log a warning and skip the response so
+ * the server is not flooded. A legitimate re-sync changes the sequences and resets
+ * the counter. Key: `${from}:${to}`.
+ */
+const privateSyncThrottle = new Map();
+const PRIVATE_SYNC_MAX = 5;
+const PRIVATE_SYNC_WINDOW_MS = 10000;
+
 // keep alive
 process.on("uncaughtException", (err) => {
 	ConsoleError("[uncaughtException] Server encountered a fatal error:");
@@ -383,7 +395,11 @@ async function saveBufferFile(request, content) {
 					is_saved: true,
 				},
 			});
-			if (file !== null) {
+			if (file === null) {
+				ConsoleWarn(
+					`[saveBufferFile] ${request.Hash}: file record not found or already saved`,
+				);
+			} else {
 				// ChunkCursor is only set when cursor > 1 in requestFile;
 				// default to 1 for the first chunk
 				const expectedCursor = request.ChunkCursor ?? 1;
@@ -400,7 +416,11 @@ async function saveBufferFile(request, content) {
 							chunk_cursor: 0,
 						},
 					});
-					fetchBulletinFile(request.Address, request.Address, request.Hash, 1);
+					if (request.NodeUrl) {
+						fetchFileFromNode(request.NodeUrl, request.Address, request.Hash, 1);
+					} else {
+						fetchBulletinFile(request.Address, request.Address, request.Hash, 1);
+					}
 				} else if (
 					file.chunk_cursor < file.chunk_length &&
 					file.chunk_cursor + 1 === expectedCursor
@@ -425,18 +445,39 @@ async function saveBufferFile(request, content) {
 							ConsoleInfo(
 								`[saveBufferFile] ${request.Hash}: requesting next chunk ${current_chunk_cursor + 1}`,
 							);
-							fetchBulletinFile(
-								request.Address,
-								request.Address,
-								request.Hash,
-								current_chunk_cursor + 1,
-							);
+							if (request.NodeUrl) {
+								fetchFileFromNode(
+									request.NodeUrl,
+									request.Address,
+									request.Hash,
+									current_chunk_cursor + 1,
+								);
+							} else {
+								fetchBulletinFile(
+									request.Address,
+									request.Address,
+									request.Hash,
+									current_chunk_cursor + 1,
+								);
+							}
 						} else {
 							ConsoleInfo(
 								`[saveBufferFile] ${request.Hash}: all chunks received, verifying hash...`,
 							);
 							const hash = FileReadHash(path.resolve(file_path));
-							if (hash !== request.Hash) {
+							if (hash === request.Hash) {
+								ConsoleInfo(
+									`[saveBufferFile] ${request.Hash}: ✅ File saved successfully! (${file.size} bytes)`,
+								);
+								await prisma.File.update({
+									where: {
+										hash: request.Hash,
+									},
+									data: {
+										is_saved: true,
+									},
+								});
+							} else {
 								ConsoleWarn(
 									`[saveBufferFile] ${request.Hash}: ❌ HASH MISMATCH! expected=${request.Hash}, got=${hash}`,
 								);
@@ -449,24 +490,11 @@ async function saveBufferFile(request, content) {
 										chunk_cursor: 0,
 									},
 								});
-								fetchBulletinFile(
-									request.Address,
-									request.Address,
-									request.Hash,
-									1,
-								);
-							} else {
-								ConsoleInfo(
-									`[saveBufferFile] ${request.Hash}: ✅ File saved successfully! (${file.size} bytes)`,
-								);
-								await prisma.File.update({
-									where: {
-										hash: request.Hash,
-									},
-									data: {
-										is_saved: true,
-									},
-								});
+								if (request.NodeUrl) {
+									fetchFileFromNode(request.NodeUrl, request.Address, request.Hash, 1);
+								} else {
+									fetchBulletinFile(request.Address, request.Address, request.Hash, 1);
+								}
 							}
 						}
 					} catch (err) {
@@ -479,10 +507,6 @@ async function saveBufferFile(request, content) {
 						`[saveBufferFile] ${request.Hash}: ❌ Unexpected cursor! expected=${file.chunk_cursor + 1}, got=${expectedCursor}, cursor=${file.chunk_cursor}, length=${file.chunk_length}`,
 					);
 				}
-			} else {
-				ConsoleWarn(
-					`[saveBufferFile] ${request.Hash}: file record not found or already saved`,
-				);
 			}
 			break;
 		}
@@ -612,7 +636,7 @@ async function CacheAvatar(from, avatar) {
 		},
 	});
 	if (db_a === null) {
-		const result = await prisma.Avatar.create({
+		await prisma.Avatar.create({
 			data: {
 				address: avatar_address,
 				hash: avatar.Hash,
@@ -627,7 +651,7 @@ async function CacheAvatar(from, avatar) {
 		db_a.signed_at < timestamp - AVATAR_UPDATE_THROTTLE_MS &&
 		avatar.Hash !== db_a.hash
 	) {
-		const result = await prisma.Avatar.update({
+		await prisma.Avatar.update({
 			where: {
 				address: avatar_address,
 			},
@@ -822,11 +846,7 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 			}
 
 			// create tag
-			if (
-				bulletin.Tag &&
-				Array.isArray(bulletin.Tag) &&
-				bulletin.Tag.length > 0
-			) {
+			if (bulletin.Tag && Array.isArray(bulletin.Tag) && bulletin.Tag.length > 0) {
 				await BindBulletinTag(hash, bulletin.Tag);
 			}
 
@@ -860,7 +880,11 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 					ConsoleInfo(
 						`[CacheBulletin] File ${file.hash}: is_saved=${file.is_saved}, cursor=${file.chunk_cursor}`,
 					);
-					if (!file.is_saved) {
+					if (file.is_saved) {
+						ConsoleInfo(
+							`[CacheBulletin] File ${file.hash} already saved, skipping fetch`,
+						);
+					} else {
 						ConsoleInfo(
 							`[CacheBulletin] Calling fetchBulletinFile for ${file.hash} from ${bulletin_address} cursor=${file.chunk_cursor + 1}`,
 						);
@@ -869,10 +893,6 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 							bulletin_address,
 							file.hash,
 							file.chunk_cursor + 1,
-						);
-					} else {
-						ConsoleInfo(
-							`[CacheBulletin] File ${file.hash} already saved, skipping fetch`,
 						);
 					}
 				}
@@ -978,58 +998,56 @@ async function CacheECDH(json) {
 				},
 			});
 		}
-	} else {
-		if (json1 != "") {
-			if (dh.json1 != "") {
-				let old_json1;
-				try {
-					old_json1 = JSON.parse(dh.json1);
-				} catch {
-					old_json1 = null;
-				}
-				if (old_json1 && json.Timestamp >= old_json1.Timestamp) {
-					return;
-				}
+	} else if (json1 != "") {
+		if (dh.json1 != "") {
+			let old_json1;
+			try {
+				old_json1 = JSON.parse(dh.json1);
+			} catch {
+				old_json1 = null;
 			}
-			await prisma.ECDH.update({
-				where: {
-					address1_address2_partition_sequence: {
-						address1: address1,
-						address2: address2,
-						partition: json.Partition,
-						sequence: json.Sequence,
-					},
-				},
-				data: {
-					json1: json1,
-				},
-			});
-		} else if (json2 != "") {
-			if (dh.json2 != "") {
-				let old_json2;
-				try {
-					old_json2 = JSON.parse(dh.json2);
-				} catch {
-					old_json2 = null;
-				}
-				if (old_json2 && json.Timestamp >= old_json2.Timestamp) {
-					return;
-				}
+			if (old_json1 && json.Timestamp >= old_json1.Timestamp) {
+				return;
 			}
-			await prisma.ECDH.update({
-				where: {
-					address1_address2_partition_sequence: {
-						address1: address1,
-						address2: address2,
-						partition: json.Partition,
-						sequence: json.Sequence,
-					},
-				},
-				data: {
-					json2: json2,
-				},
-			});
 		}
+		await prisma.ECDH.update({
+			where: {
+				address1_address2_partition_sequence: {
+					address1: address1,
+					address2: address2,
+					partition: json.Partition,
+					sequence: json.Sequence,
+				},
+			},
+			data: {
+				json1: json1,
+			},
+		});
+	} else if (json2 != "") {
+		if (dh.json2 != "") {
+			let old_json2;
+			try {
+				old_json2 = JSON.parse(dh.json2);
+			} catch {
+				old_json2 = null;
+			}
+			if (old_json2 && json.Timestamp >= old_json2.Timestamp) {
+				return;
+			}
+		}
+		await prisma.ECDH.update({
+			where: {
+				address1_address2_partition_sequence: {
+					address1: address1,
+					address2: address2,
+					partition: json.Partition,
+					sequence: json.Sequence,
+				},
+			},
+			data: {
+				json2: json2,
+			},
+		});
 	}
 }
 
@@ -1090,9 +1108,7 @@ async function CachePrivateMessage(json) {
 		},
 	});
 	if (
-		(last_msg === null &&
-			json.Sequence === 1 &&
-			json.PreHash === GenesisHash) ||
+		(last_msg === null && json.Sequence === 1 && json.PreHash === GenesisHash) ||
 		(last_msg !== null &&
 			json.Sequence === last_msg.sequence + 1 &&
 			json.PreHash === last_msg.hash)
@@ -1198,10 +1214,10 @@ async function HandleGroupSync(from) {
 		const group_create_json_list = [];
 		for (let i = 0; i < group_list.length; i++) {
 			const group = group_list[i];
-			if (group.delete_json !== null) {
+			if (group.delete_json === null) {
 				let parsedGroup;
 				try {
-					parsedGroup = JSON.parse(group.delete_json);
+					parsedGroup = JSON.parse(group.create_json);
 				} catch {
 					parsedGroup = null;
 				}
@@ -1209,7 +1225,7 @@ async function HandleGroupSync(from) {
 			} else {
 				let parsedGroup;
 				try {
-					parsedGroup = JSON.parse(group.create_json);
+					parsedGroup = JSON.parse(group.delete_json);
 				} catch {
 					parsedGroup = null;
 				}
@@ -1246,7 +1262,7 @@ async function CacheGroup(group) {
 					delete_json: JSON.stringify(group),
 				},
 			});
-			if (result > 0) {
+			if (result) {
 				delete groupMap[group.Hash];
 			}
 		}
@@ -1369,7 +1385,34 @@ async function handleObject(from, message, json, isFromNode) {
 					`[handleObject.Bulletin] Received seq=${json.Sequence} from ${address}, checking sync`,
 				);
 				const gap_sequence = await FindFirstMissingSequence(address);
-				if (gap_sequence !== null) {
+				if (gap_sequence === null) {
+					// No gap — chase the next sequence after current max (only once per address)
+					if (syncConfirmSent[address]) {
+						ConsoleInfo(
+							`[handleObject.Bulletin] ${address}: N+1 confirmation already sent, skipping further chase`,
+						);
+					} else {
+						syncConfirmSent[address] = true;
+						const next_seq = await GetMaxSequencePlusOne(address);
+						if (next_seq === null) {
+							ConsoleDebug(
+								`[handleObject.Bulletin] ${address}: no bulletins to request`,
+							);
+						} else {
+							ConsoleInfo(
+								`[handleObject.Bulletin] Sending BulletinRequest seq=${next_seq} to ${address} (N+1 confirmation, max cached=${next_seq - 1})`,
+							);
+							const msg = GenBulletinRequest(
+								address,
+								next_seq,
+								address,
+								SelfPublicKey,
+								SelfPrivateKey,
+							);
+							SendMessage(from, msg);
+						}
+					}
+				} else {
 					// Gap exists — fetch from the missing point
 					ConsoleInfo(
 						`[handleObject.Bulletin] Sending BulletinRequest seq=${gap_sequence} to ${address} (filling gap)`,
@@ -1382,33 +1425,6 @@ async function handleObject(from, message, json, isFromNode) {
 						SelfPrivateKey,
 					);
 					SendMessage(from, msg);
-				} else {
-					// No gap — chase the next sequence after current max (only once per address)
-					if (!syncConfirmSent[address]) {
-						syncConfirmSent[address] = true;
-						const next_seq = await GetMaxSequencePlusOne(address);
-						if (next_seq !== null) {
-							ConsoleInfo(
-								`[handleObject.Bulletin] Sending BulletinRequest seq=${next_seq} to ${address} (N+1 confirmation, max cached=${next_seq - 1})`,
-							);
-							const msg = GenBulletinRequest(
-								address,
-								next_seq,
-								address,
-								SelfPublicKey,
-								SelfPrivateKey,
-							);
-							SendMessage(from, msg);
-						} else {
-							ConsoleDebug(
-								`[handleObject.Bulletin] ${address}: no bulletins to request`,
-							);
-						}
-					} else {
-						ConsoleInfo(
-							`[handleObject.Bulletin] ${address}: N+1 confirmation already sent, skipping further chase`,
-						);
-					}
 				}
 			}
 			break;
@@ -1516,10 +1532,29 @@ async function handleObject(from, message, json, isFromNode) {
 			}
 			break;
 		case ObjectType.GroupMessageList: {
-			const members = groupMap[json.Hash];
+			const members = groupMap[json.GroupHash];
 			if (members) {
 				if (members.includes(from) && members.includes(json.To)) {
 					SendMessage(json.To, message);
+				}
+			} else {
+				// Group not in memory map — check if it was deleted, notify the sender
+				const db_g = await prisma.Group.findFirst({
+					where: { hash: json.GroupHash },
+					select: { deleted_at: true, delete_json: true },
+				});
+				if (db_g && db_g.deleted_at !== null && db_g.delete_json) {
+					try {
+						const group_response = {
+							ObjectType: ObjectType.GroupList,
+							List: [JSON.parse(db_g.delete_json)],
+						};
+						SendMessage(from, JSON.stringify(group_response));
+					} catch (e) {
+						ConsoleError(
+							`[handleObject.GroupMessageList] failed to notify deleted group ${json.GroupHash}: ${e.message}`,
+						);
+					}
 				}
 			}
 			break;
@@ -1666,12 +1701,7 @@ async function handleAction(from, message, json) {
 		}
 
 		if (tmp_list.length > 0) {
-			const msg = GenReplyBulletinList(
-				json.Hash,
-				json.Page,
-				total_page,
-				tmp_list,
-			);
+			const msg = GenReplyBulletinList(json.Hash, json.Page, total_page, tmp_list);
 			SendMessage(from, msg);
 		} else {
 			const post_bulletin = await prisma.Bulletin.findFirst({
@@ -1753,6 +1783,36 @@ async function handleAction(from, message, json) {
 	} else if (json.Action === ActionCode.AvatarRequest) {
 		await HandleAvatarRequest(json, from);
 	} else if (json.Action === ActionCode.PrivateMessageSync) {
+		// Throttle: detect a client-side sync loop. If the same (from, to) pair
+		// re-sends the IDENTICAL (SelfSequence, PairSequence) request more than
+		// PRIVATE_SYNC_MAX times within PRIVATE_SYNC_WINDOW_MS, the client's local
+		// state is not advancing (a loop) — log a warning and skip the response so
+		// the server is not flooded. A legitimate re-sync changes the sequences and
+		// resets the counter.
+		const throttleKey = `${from}:${json.To}`;
+		const now = Date.now();
+		let entry = privateSyncThrottle.get(throttleKey);
+		if (
+			!entry ||
+			now - entry.windowStart > PRIVATE_SYNC_WINDOW_MS ||
+			entry.selfSeq !== json.SelfSequence ||
+			entry.pairSeq !== json.PairSequence
+		) {
+			entry = {
+				selfSeq: json.SelfSequence,
+				pairSeq: json.PairSequence,
+				count: 0,
+				windowStart: now,
+			};
+			privateSyncThrottle.set(throttleKey, entry);
+		}
+		entry.count++;
+		if (entry.count > PRIVATE_SYNC_MAX) {
+			ConsoleWarn(
+				`[PrivateMessageSync] THROTTLED: ${entry.count} identical requests from ${from} to ${json.To} (SelfSeq=${json.SelfSequence}, PairSeq=${json.PairSequence}) in ${PRIVATE_SYNC_WINDOW_MS}ms — likely a client sync loop, skipping response`,
+			);
+			return;
+		}
 		await HandlePrivateMessageSync(json);
 	} else if (json.Action === ActionCode.GroupSync) {
 		await HandleGroupSync(from);
@@ -1814,68 +1874,11 @@ async function SyncClientRequest(address) {
 		`[SyncClientRequest] FindFirstMissingSequence result: ${gap_sequence}`,
 	);
 	let sentBulletinRequest = false;
-	if (gap_sequence !== null) {
-		// Gap exists — fetch from the missing point
-		ConsoleInfo(
-			`[SyncClientRequest] Sending BulletinRequest seq=${gap_sequence} to ${address} (filling gap)`,
-		);
-		const msg = GenBulletinRequest(
-			address,
-			gap_sequence,
-			address,
-			SelfPublicKey,
-			SelfPrivateKey,
-		);
-		// Self-test: verify our own signature before sending
-		let selfSigOk = false;
-		try {
-			selfSigOk = VerifyJsonSignature(JSON.parse(msg));
-		} catch (e) {
-			ConsoleWarn(
-				`[SyncClientRequest] Self-signature test ERROR: ${e.message}`,
-			);
-		}
-		ConsoleInfo(
-			`[SyncClientRequest] Self-signature test: ${selfSigOk ? "PASS" : "FAIL"} for BulletinRequest`,
-		);
-		ConsoleInfo(`[SyncClientRequest] BulletinRequest FULL payload: ${msg}`);
-		SendMessage(address, msg);
-		ConsoleInfo(`[SyncClientRequest] BulletinRequest SENT via SendMessage`);
-		sentBulletinRequest = true;
-	} else {
+	if (gap_sequence === null) {
 		// No gap — chase next sequence after current max
 		const next_seq = await GetMaxSequencePlusOne(address);
-		ConsoleInfo(
-			`[SyncClientRequest] GetMaxSequencePlusOne result: ${next_seq}`,
-		);
-		if (next_seq !== null) {
-			ConsoleInfo(
-				`[SyncClientRequest] Sending BulletinRequest seq=${next_seq} to ${address} (chasing new)`,
-			);
-			const msg = GenBulletinRequest(
-				address,
-				next_seq,
-				address,
-				SelfPublicKey,
-				SelfPrivateKey,
-			);
-			// Self-test: verify our own signature before sending
-			let selfSigOk = false;
-			try {
-				selfSigOk = VerifyJsonSignature(JSON.parse(msg));
-			} catch (e) {
-				ConsoleWarn(
-					`[SyncClientRequest] Self-signature test ERROR: ${e.message}`,
-				);
-			}
-			ConsoleInfo(
-				`[SyncClientRequest] Self-signature test: ${selfSigOk ? "PASS" : "FAIL"} for BulletinRequest`,
-			);
-			ConsoleInfo(`[SyncClientRequest] BulletinRequest FULL payload: ${msg}`);
-			SendMessage(address, msg);
-			ConsoleInfo(`[SyncClientRequest] BulletinRequest SENT via SendMessage`);
-			sentBulletinRequest = true;
-		} else {
+		ConsoleInfo(`[SyncClientRequest] GetMaxSequencePlusOne result: ${next_seq}`);
+		if (next_seq === null) {
 			// Database empty for this address — start from seq=1
 			ConsoleInfo(
 				`[SyncClientRequest] ${address}: no local bulletins, starting sync from seq=1`,
@@ -1892,9 +1895,32 @@ async function SyncClientRequest(address) {
 			try {
 				selfSigOk = VerifyJsonSignature(JSON.parse(msg));
 			} catch (e) {
-				ConsoleWarn(
-					`[SyncClientRequest] Self-signature test ERROR: ${e.message}`,
-				);
+				ConsoleWarn(`[SyncClientRequest] Self-signature test ERROR: ${e.message}`);
+			}
+			ConsoleInfo(
+				`[SyncClientRequest] Self-signature test: ${selfSigOk ? "PASS" : "FAIL"} for BulletinRequest`,
+			);
+			ConsoleInfo(`[SyncClientRequest] BulletinRequest FULL payload: ${msg}`);
+			SendMessage(address, msg);
+			ConsoleInfo(`[SyncClientRequest] BulletinRequest SENT via SendMessage`);
+			sentBulletinRequest = true;
+		} else {
+			ConsoleInfo(
+				`[SyncClientRequest] Sending BulletinRequest seq=${next_seq} to ${address} (chasing new)`,
+			);
+			const msg = GenBulletinRequest(
+				address,
+				next_seq,
+				address,
+				SelfPublicKey,
+				SelfPrivateKey,
+			);
+			// Self-test: verify our own signature before sending
+			let selfSigOk = false;
+			try {
+				selfSigOk = VerifyJsonSignature(JSON.parse(msg));
+			} catch (e) {
+				ConsoleWarn(`[SyncClientRequest] Self-signature test ERROR: ${e.message}`);
 			}
 			ConsoleInfo(
 				`[SyncClientRequest] Self-signature test: ${selfSigOk ? "PASS" : "FAIL"} for BulletinRequest`,
@@ -1904,6 +1930,32 @@ async function SyncClientRequest(address) {
 			ConsoleInfo(`[SyncClientRequest] BulletinRequest SENT via SendMessage`);
 			sentBulletinRequest = true;
 		}
+	} else {
+		// Gap exists — fetch from the missing point
+		ConsoleInfo(
+			`[SyncClientRequest] Sending BulletinRequest seq=${gap_sequence} to ${address} (filling gap)`,
+		);
+		const msg = GenBulletinRequest(
+			address,
+			gap_sequence,
+			address,
+			SelfPublicKey,
+			SelfPrivateKey,
+		);
+		// Self-test: verify our own signature before sending
+		let selfSigOk = false;
+		try {
+			selfSigOk = VerifyJsonSignature(JSON.parse(msg));
+		} catch (e) {
+			ConsoleWarn(`[SyncClientRequest] Self-signature test ERROR: ${e.message}`);
+		}
+		ConsoleInfo(
+			`[SyncClientRequest] Self-signature test: ${selfSigOk ? "PASS" : "FAIL"} for BulletinRequest`,
+		);
+		ConsoleInfo(`[SyncClientRequest] BulletinRequest FULL payload: ${msg}`);
+		SendMessage(address, msg);
+		ConsoleInfo(`[SyncClientRequest] BulletinRequest SENT via SendMessage`);
+		sentBulletinRequest = true;
 	}
 
 	// Wait for client to respond with bulletin (ObjectType=400)
@@ -2165,6 +2217,7 @@ function fetchFileFromNode(url, address, hash, chunk_cursor) {
 		Hash: hash,
 		ChunkCursor: chunk_cursor,
 		Address: address,
+		NodeUrl: url,
 		Timestamp: Date.now(),
 	};
 	const prev_request =
@@ -2331,7 +2384,9 @@ function keepNodeSync() {
 }
 
 async function loadgroupMap() {
-	const group_list = await prisma.Group.findMany();
+	const group_list = await prisma.Group.findMany({
+		where: { deleted_at: null },
+	});
 	for (let i = 0; i < group_list.length; i++) {
 		const group = group_list[i];
 		let group_member;
@@ -2408,9 +2463,7 @@ async function refreshData() {
 			} catch {
 				bJson = null;
 			}
-			return bJson
-				? { hash: b.hash, json: bJson, signed_at: b.signed_at }
-				: null;
+			return bJson ? { hash: b.hash, json: bJson, signed_at: b.signed_at } : null;
 		})
 		.filter(Boolean);
 
@@ -2435,8 +2488,7 @@ async function refreshData() {
 		const batch = parsed
 			.slice(i, i + tagBatchSize)
 			.filter(
-				({ json }) =>
-					json.Tag && Array.isArray(json.Tag) && json.Tag.length > 0,
+				({ json }) => json.Tag && Array.isArray(json.Tag) && json.Tag.length > 0,
 			);
 		if (batch.length === 0) continue;
 
