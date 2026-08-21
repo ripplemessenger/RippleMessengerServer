@@ -84,10 +84,11 @@ const MessageCode = {
 	TimestampInvalid: 703,
 	AddressMismatch: 704,
 
-	// Notification codes (informational, no disconnect): 710-712
+	// Notification codes (informational, no disconnect): 710-713
 	KickedByNewConn: 710,
 	ServerShutdown: 711,
 	SyncComplete: 712,
+	NotAllowed: 713,
 
 	// Cache success codes (server local operation confirmation): 720-723
 	BulletinCached: 720,

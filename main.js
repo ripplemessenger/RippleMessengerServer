@@ -90,7 +90,7 @@ let SelfPrivateKey;
 let NodeList = [];
 let WhiteList = [];
 
-function isAddressAllowed(address) {
+function isAllowed(address) {
 	if (WhiteList.length === 0) return true;
 	return WhiteList.includes(address);
 }
@@ -176,6 +176,13 @@ async function handleBinaryMessage(data) {
 		request.Type === FileRequestType.PrivateChatFile ||
 		request.Type === FileRequestType.GroupChatFile
 	) {
+		if (!isAllowed(request.From)) {
+			ConsoleWarn(
+				`[Chat Filter] Blocked binary file forward to ${request.From} (type=${request.Type})`,
+			);
+			removeFileRequestByNonce(request.Nonce);
+			return;
+		}
 		// forward file data to the destination peer
 		removeFileRequestByNonce(request.Nonce);
 		SendMessage(request.From, data);
@@ -591,6 +598,17 @@ async function HandleFileRequest(request, from) {
 			cachePrivateFileRequest(from, request);
 			break;
 		case FileRequestType.GroupChatFile: {
+			if (!isAllowed(from)) {
+				ConsoleWarn(`[Chat Filter] Blocked GroupChatFile from ${from}`);
+				SendMessage(
+					from,
+					GenServerNotifyError(
+						MessageCode.NotAllowed,
+						"Chat not allowed for this address",
+					),
+				);
+				break;
+			}
 			cacheGroupFileRequest(from, request);
 			const members = groupMap[request.GroupHash];
 			if (members) {
@@ -798,10 +816,23 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 	const hash = QuarterSHA512Message(bulletin);
 	const bulletin_address = rippleKeyPairs.deriveAddress(bulletin.PublicKey);
 
-	if (isFromNode && !isAddressAllowed(bulletin_address)) {
-		ConsoleDebug(
-			`[Node Sync Filter] Dropped bulletin from non-whitelisted address: ${bulletin_address}`,
-		);
+	if (!isAllowed(bulletin_address)) {
+		if (isFromNode) {
+			ConsoleDebug(
+				`[Node Sync Filter] Dropped bulletin from non-whitelisted address: ${bulletin_address}`,
+			);
+		} else {
+			ConsoleWarn(
+				`[Whitelist Filter] Rejected bulletin from non-whitelisted address: ${bulletin_address}`,
+			);
+			SendMessage(
+				from,
+				GenServerNotifyError(
+					MessageCode.NotAllowed,
+					"You are not allowed to post bulletins",
+				),
+			);
+		}
 		return;
 	}
 
@@ -909,7 +940,7 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 				}
 			}
 
-			if (isAddressAllowed(bulletin_address)) {
+			if (isAllowed(bulletin_address)) {
 				broadcastBulletinToNodes(bulletin);
 			}
 		}
@@ -1434,7 +1465,7 @@ async function handleObject(from, message, json, isFromNode) {
 			// pull step 2: fetch account latest bulletin
 			let items = json.List;
 			if (WhiteList.length > 0) {
-				items = items.filter((item) => isAddressAllowed(item.Address));
+				items = items.filter((item) => isAllowed(item.Address));
 			}
 
 			for (let i = 0; i < items.length; i++) {
@@ -1500,6 +1531,17 @@ async function handleObject(from, message, json, isFromNode) {
 			break;
 		}
 		case ObjectType.PrivateMessage:
+			if (!isAllowed(from) || !isAllowed(json.To)) {
+				ConsoleWarn(`[Chat Filter] Blocked PrivateMessage: ${from} → ${json.To}`);
+				SendMessage(
+					from,
+					GenServerNotifyError(
+						MessageCode.NotAllowed,
+						"Chat not allowed for this address",
+					),
+				);
+				break;
+			}
 			if (VerifyJsonSignature(json)) {
 				await CachePrivateMessage(json);
 				SendMessage(from, GenServerNotifyCache(MessageCode.PrivateMsgCached));
@@ -1507,6 +1549,17 @@ async function handleObject(from, message, json, isFromNode) {
 			}
 			break;
 		case ObjectType.ECDH:
+			if (!isAllowed(from) || !isAllowed(json.To)) {
+				ConsoleWarn(`[Chat Filter] Blocked ECDH: ${from} → ${json.To}`);
+				SendMessage(
+					from,
+					GenServerNotifyError(
+						MessageCode.NotAllowed,
+						"Chat not allowed for this address",
+					),
+				);
+				break;
+			}
 			if (VerifyJsonSignature(json)) {
 				await CacheECDH(json);
 				SendMessage(from, GenServerNotifyCache(MessageCode.HandshakeCached));
@@ -1524,6 +1577,17 @@ async function handleObject(from, message, json, isFromNode) {
 			break;
 		// group
 		case ObjectType.GroupList:
+			if (!isAllowed(from)) {
+				ConsoleWarn(`[Chat Filter] Blocked GroupList from ${from}`);
+				SendMessage(
+					from,
+					GenServerNotifyError(
+						MessageCode.NotAllowed,
+						"Chat not allowed for this address",
+					),
+				);
+				break;
+			}
 			for (let i = 0; i < json.List.length; i++) {
 				const group = json.List[i];
 				if (VerifyJsonSignature(group)) {
@@ -1532,6 +1596,17 @@ async function handleObject(from, message, json, isFromNode) {
 			}
 			break;
 		case ObjectType.GroupMessageList: {
+			if (!isAllowed(from) || !isAllowed(json.To)) {
+				ConsoleWarn(`[Chat Filter] Blocked GroupMessageList: ${from} → ${json.To}`);
+				SendMessage(
+					from,
+					GenServerNotifyError(
+						MessageCode.NotAllowed,
+						"Chat not allowed for this address",
+					),
+				);
+				break;
+			}
 			const members = groupMap[json.GroupHash];
 			if (members) {
 				if (members.includes(from) && members.includes(json.To)) {
@@ -1583,15 +1658,30 @@ async function handleAction(from, message, json) {
 
 	// forward message only after signature verification succeeds
 	if (json.To != undefined) {
+		if (!isAllowed(from) || !isAllowed(json.To)) {
+			ConsoleWarn(
+				`[Chat Filter] Blocked forward: ${from} → ${json.To} (action=${json.Action})`,
+			);
+			SendMessage(
+				from,
+				GenServerNotifyError(
+					MessageCode.NotAllowed,
+					"Chat not allowed for this address",
+				),
+			);
+			return;
+		}
 		SendMessage(json.To, message);
 	}
 
 	if (json.Action === ActionCode.BulletinRequest) {
 		//send cache bulletin
+		const addrFilter = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
 		if (json.Hash) {
 			const bulletin = await prisma.Bulletin.findFirst({
 				where: {
 					hash: json.Hash,
+					...addrFilter,
 				},
 				select: {
 					json: true,
@@ -1605,6 +1695,7 @@ async function handleAction(from, message, json) {
 				where: {
 					address: json.Address,
 					sequence: json.Sequence,
+					...addrFilter,
 				},
 				select: {
 					json: true,
@@ -1652,6 +1743,15 @@ async function handleAction(from, message, json) {
 			SendMessage(from, msg);
 		}
 	} else if (json.Action === ActionCode.ReplyBulletinRequest && json.Page > 0) {
+		const addrFilter = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
+		// Check if parent bulletin is from a whitelisted address
+		const parentBulletin = await prisma.Bulletin.findFirst({
+			where: { hash: json.Hash, ...addrFilter },
+			select: { hash: true },
+		});
+		if (parentBulletin === null) {
+			return;
+		}
 		const reply_hash_list = await prisma.Reply.findMany({
 			where: {
 				post_hash: json.Hash,
@@ -1673,6 +1773,7 @@ async function handleAction(from, message, json) {
 				hash: {
 					in: tmp_list,
 				},
+				...addrFilter,
 			},
 			select: {
 				json: true,
@@ -1723,8 +1824,12 @@ async function handleAction(from, message, json) {
 			}
 		}
 	} else if (json.Action === ActionCode.TagBulletinRequest && json.Page > 0) {
+		const addrFilter = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
 		const whereCondition = {
-			AND: json.Tag.map((name) => ({ tags: { some: { name: name } } })),
+			AND: [
+				...json.Tag.map((name) => ({ tags: { some: { name: name } } })),
+				...Object.entries(addrFilter),
+			],
 		};
 		const [list, total] = await prisma.$transaction([
 			prisma.Bulletin.findMany({
@@ -1761,8 +1866,12 @@ async function handleAction(from, message, json) {
 			SendMessage(from, msg);
 		}
 	} else if (json.Action === ActionCode.RandomBulletinRequest) {
+		const whereClause =
+			WhiteList.length > 0
+				? `WHERE address IN (${WhiteList.map((a) => `'${a}'`).join(",")})`
+				: "";
 		const list =
-			await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ORDER BY RANDOM() LIMIT ${20}`;
+			await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ${whereClause} ORDER BY RANDOM() LIMIT ${20}`;
 		const tmp_list = [];
 		list.forEach((bulletin) => {
 			let parsedBulletin;
@@ -1815,8 +1924,30 @@ async function handleAction(from, message, json) {
 		}
 		await HandlePrivateMessageSync(json);
 	} else if (json.Action === ActionCode.GroupSync) {
+		if (!isAllowed(from)) {
+			ConsoleWarn(`[Chat Filter] Blocked GroupSync from ${from}`);
+			SendMessage(
+				from,
+				GenServerNotifyError(
+					MessageCode.NotAllowed,
+					"Chat not allowed for this address",
+				),
+			);
+			return;
+		}
 		await HandleGroupSync(from);
 	} else if (json.Action === ActionCode.GroupMessageSync) {
+		if (!isAllowed(from)) {
+			ConsoleWarn(`[Chat Filter] Blocked GroupMessageSync from ${from}`);
+			SendMessage(
+				from,
+				GenServerNotifyError(
+					MessageCode.NotAllowed,
+					"Chat not allowed for this address",
+				),
+			);
+			return;
+		}
 		const members = groupMap[json.Hash];
 		if (members) {
 			const tmp_members = shuffleArray(members);
@@ -2021,33 +2152,41 @@ async function SyncClientRequest(address) {
 	}
 
 	// ecdh
-	const dh = await prisma.ECDH.findFirst({
-		where: {
-			OR: [
-				{
-					address1: address,
-					json1: "",
-				},
-				{
-					address2: address,
-					json2: "",
-				},
-			],
-		},
-	});
-	if (dh != null) {
-		if (dh.json1 === "") {
-			SendMessage(address, dh.json2);
-		} else if (dh.json2 === "") {
-			SendMessage(address, dh.json1);
+	if (isAllowed(address)) {
+		const dh = await prisma.ECDH.findFirst({
+			where: {
+				OR: [
+					{
+						address1: address,
+						json1: "",
+					},
+					{
+						address2: address,
+						json2: "",
+					},
+				],
+			},
+		});
+		if (dh != null) {
+			if (dh.json1 === "") {
+				SendMessage(address, dh.json2);
+			} else if (dh.json2 === "") {
+				SendMessage(address, dh.json1);
+			}
 		}
+	} else {
+		ConsoleDebug(`[Chat Filter] Skipped ECDH sync for ${address}`);
 	}
 
 	// group
-	const msg = GenGroupSync(SelfPublicKey, SelfPrivateKey);
-	SendMessage(address, msg);
+	if (isAllowed(address)) {
+		const msg = GenGroupSync(SelfPublicKey, SelfPrivateKey);
+		SendMessage(address, msg);
 
-	await HandleGroupSync(address);
+		await HandleGroupSync(address);
+	} else {
+		ConsoleDebug(`[Chat Filter] Skipped Group sync for ${address}`);
+	}
 }
 
 async function checkMessage(ws, message, isFromNode = false) {
@@ -2126,21 +2265,6 @@ async function checkMessage(ws, message, isFromNode = false) {
 					Conns[address] === undefined &&
 					json.Action === ActionCode.Declare
 				) {
-					if (!isAddressAllowed(address)) {
-						ConsoleWarn(
-							`❌ Connection rejected - address not in whitelist: ${address}`,
-						);
-						ws.send(
-							JSON.stringify({
-								Action: "Error",
-								Code: "NotInWhitelist",
-								Message: "Your address is not in the whitelist",
-							}),
-						);
-						terminateConn(ws);
-						return;
-					}
-
 					const isNodeConnection = json.URL != null && CheckServerURL(json.URL);
 
 					// new connection and new address
@@ -2248,6 +2372,15 @@ async function downloadBulletinFile(url) {
 			is_saved: {
 				equals: false,
 			},
+			...(WhiteList.length > 0
+				? {
+						bulletins: {
+							some: {
+								address: { in: WhiteList },
+							},
+						},
+					}
+				: {}),
 		},
 	});
 
@@ -2634,11 +2767,14 @@ async function main() {
 		NodeList = config.NodeList;
 		ConsoleInfo(JSON.stringify(NodeList, null, 2));
 
-		WhiteList = Array.isArray(config.WhiteList) ? config.WhiteList : [];
-		ConsoleWarn(`WhiteList loaded: ${WhiteList.length} addresses`);
+		const wl = config.WhiteList;
+		if (Array.isArray(wl)) {
+			WhiteList = wl;
+		}
+		ConsoleWarn(`WhiteList loaded: ${WhiteList.length} address(es)`);
 		if (WhiteList.length > 0) {
 			ConsoleWarn(
-				"⚠️  WhiteList mode enabled - only whitelisted addresses can connect",
+				"⚠️  WhiteList mode enabled - only whitelisted addresses have full access",
 			);
 		} else {
 			ConsoleWarn("🌐  WhiteList is empty - open to all addresses");
