@@ -1824,12 +1824,8 @@ async function handleAction(from, message, json) {
 			}
 		}
 	} else if (json.Action === ActionCode.TagBulletinRequest && json.Page > 0) {
-		const addrFilter = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
 		const whereCondition = {
-			AND: [
-				...json.Tag.map((name) => ({ tags: { some: { name: name } } })),
-				...Object.entries(addrFilter),
-			],
+			AND: json.Tag.map((name) => ({ tags: { some: { name: name } } })),
 		};
 		const [list, total] = await prisma.$transaction([
 			prisma.Bulletin.findMany({
@@ -1866,12 +1862,8 @@ async function handleAction(from, message, json) {
 			SendMessage(from, msg);
 		}
 	} else if (json.Action === ActionCode.RandomBulletinRequest) {
-		const whereClause =
-			WhiteList.length > 0
-				? `WHERE address IN (${WhiteList.map((a) => `'${a}'`).join(",")})`
-				: "";
 		const list =
-			await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ${whereClause} ORDER BY RANDOM() LIMIT ${20}`;
+			await prisma.$queryRaw`SELECT * FROM "public"."Bulletin" ORDER BY RANDOM() LIMIT ${20}`;
 		const tmp_list = [];
 		list.forEach((bulletin) => {
 			let parsedBulletin;
