@@ -701,7 +701,7 @@ async function HandleAvatarRequest(request, from) {
 	const addresses = request.List.map((item) => item.Address);
 	const db_avatars = await prisma.Avatar.findMany({
 		where: { address: { in: addresses } },
-		select: { is_saved: true, signed_at: true, json: true },
+		select: { address: true, is_saved: true, signed_at: true, json: true },
 	});
 	const avatarMap = new Map(db_avatars.map((a) => [a.address, a]));
 
@@ -718,6 +718,7 @@ async function HandleAvatarRequest(request, from) {
 					parsedAvatar = null;
 				}
 				if (parsedAvatar) new_list.push(parsedAvatar);
+				else console.log(`[HandleAvatarRequest]   parsedAvatar is NULL`);
 			} else if (db_avatar.signed_at < avatar.SignedAt) {
 				old_list.push({
 					Address: avatar.Address,
