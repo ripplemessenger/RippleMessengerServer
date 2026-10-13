@@ -1418,31 +1418,24 @@ async function handleObject(from, message, json, isFromNode) {
 				);
 				const gap_sequence = await FindFirstMissingSequence(address);
 				if (gap_sequence === null) {
-					// No gap — chase the next sequence after current max (only once per address)
-					if (syncConfirmSent[address]) {
-						ConsoleInfo(
-							`[handleObject.Bulletin] ${address}: N+1 confirmation already sent, skipping further chase`,
+					// No gap — chase the next sequence after current max
+					const next_seq = await GetMaxSequencePlusOne(address);
+					if (next_seq === null) {
+						ConsoleDebug(
+							`[handleObject.Bulletin] ${address}: no bulletins to request`,
 						);
 					} else {
-						syncConfirmSent[address] = true;
-						const next_seq = await GetMaxSequencePlusOne(address);
-						if (next_seq === null) {
-							ConsoleDebug(
-								`[handleObject.Bulletin] ${address}: no bulletins to request`,
-							);
-						} else {
-							ConsoleInfo(
-								`[handleObject.Bulletin] Sending BulletinRequest seq=${next_seq} to ${address} (N+1 confirmation, max cached=${next_seq - 1})`,
-							);
-							const msg = GenBulletinRequest(
-								address,
-								next_seq,
-								address,
-								SelfPublicKey,
-								SelfPrivateKey,
-							);
-							SendMessage(from, msg);
-						}
+						ConsoleInfo(
+							`[handleObject.Bulletin] Sending BulletinRequest seq=${next_seq} to ${address} (chasing next, max cached=${next_seq - 1})`,
+						);
+						const msg = GenBulletinRequest(
+							address,
+							next_seq,
+							address,
+							SelfPublicKey,
+							SelfPrivateKey,
+						);
+						SendMessage(from, msg);
 					}
 				} else {
 					// Gap exists — fetch from the missing point
