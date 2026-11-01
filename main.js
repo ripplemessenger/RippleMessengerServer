@@ -2730,7 +2730,7 @@ async function main() {
 	fs.mkdirSync(path.resolve(`./${FileDir}`), { recursive: true });
 	fs.mkdirSync(path.resolve(`./${AvatarDir}`), { recursive: true });
 
-	const seed = rippleKeyPairs.generateSeed("RandomSeed", "secp256k1");
+	const seed = rippleKeyPairs.generateSeed({algorithm:'ed25519'});
 	const keypair = rippleKeyPairs.deriveKeypair(seed);
 	SelfAddress = rippleKeyPairs.deriveAddress(keypair.publicKey);
 	SelfPublicKey = keypair.publicKey;
