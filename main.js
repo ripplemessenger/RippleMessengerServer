@@ -2369,7 +2369,7 @@ async function checkMessage(ws, message, isFromNode = false) {
 	);
 	ConsoleInfo(`${message}`);
 	// ConsoleInfo(`${message.slice(0, 512)}`)
-	json = MsgValidate(message);
+	const json = MsgValidate(message);
 	if (json === false) {
 		ConsoleWarn(
 			`[checkMessage] ❌ Schema validation FAILED for message from ${connAddress || "unknown"}, terminating connection`,
