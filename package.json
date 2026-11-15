@@ -1,12 +1,15 @@
 {
   "type": "module",
   "dependencies": {
-    "@prisma/client": "^6.15.0",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.5.0",
+    "@ripplemessenger/protocol": "file:./protocol",
     "ajv": "^8.17.1",
+    "dotenv": "^18.0.10",
     "ripple-keypairs": "^3.1.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "prisma": "^6.15.0"
+    "prisma": "^7.5.0"
   }
 }

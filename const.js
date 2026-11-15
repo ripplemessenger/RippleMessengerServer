@@ -12,7 +12,10 @@ const ConfigPath = './config.json'
 
 const NonceMax = 2 ** 32 - 1
 const FileChunkSize = 1024 * 1024
-const FileMaxSize = 1024 * 1024 * 1024
+// Hard technical ceiling for any attachment. Matches the client-side
+// AppConst.FileMaxSize and what the README advertises, so a publisher cannot
+// declare a bigger file than any real client is able to produce.
+const FileMaxSize = 64 * 1024 * 1024
 const BulletinFileExtRegex = /jpg|png|jpeg|txt|md/i
 
 const PageSize = 20

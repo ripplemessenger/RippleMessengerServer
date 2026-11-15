@@ -164,34 +164,27 @@ function QuarterSHA512Message(data) {
 }
 
 /**
- * Convert a string to its uppercase hex representation.
- * Each character is converted to its 2-digit hex code point.
- * @param {string} str - Input string
- * @returns {string} Uppercase hex string
- */
-function StrToHex(str) {
-  let arr = []
-  let length = str.length
-  for (let i = 0; i < length; i++) {
-    arr[i] = (str.charCodeAt(i).toString(16))
-  }
-  return arr.join('').toUpperCase()
-}
-
-/**
  * Read a file from disk and compute its quarter-SHA-512 hash.
+ *
+ * Streams the file instead of using fs.readFileSync: this runs on the Node
+ * event loop shared by every WebSocket connection, so a synchronous read of a
+ * large attachment would stall all client traffic (and spike memory) for the
+ * duration of the read + hash.
+ *
  * @param {string} file_path - Absolute or relative path to the file
- * @returns {string|null} 32-character hex hash, or null on read error
+ * @returns {Promise<string|null>} 32-character hex hash, or null on read error
  */
 function FileReadHash(file_path) {
-  let file_content
-  try {
-    file_content = fs.readFileSync(file_path)
-  } catch (err) {
-    ConsoleError(err)
-    return null
-  }
-  return QuarterSHA512(file_content)
+  return new Promise((resolve) => {
+    const hasher = crypto.createHash('sha512')
+    const stream = fs.createReadStream(file_path)
+    stream.on('error', (err) => {
+      ConsoleError(err)
+      resolve(null)
+    })
+    stream.on('data', (chunk) => hasher.update(chunk))
+    stream.on('end', () => resolve(hasher.digest('hex').toUpperCase().substring(0, 32)))
+  })
 }
 
 /**
@@ -202,19 +195,6 @@ function FileReadHash(file_path) {
 function FileBufferHash(buffer) {
   const hash = QuarterSHA512(buffer)
   return hash
-}
-
-/**
- * Generate an EdDSA/Ed25519 signature for a string using the XRPL keypairs library.
- * The string is first converted to hex, then signed with the given secret key.
- * @param {string} str - Plain text to sign
- * @param {string} sk - Secret key (hex-encoded)
- * @returns {string} Hex-encoded signature
- */
-function GenSignature(str, sk) {
-  let strHex = StrToHex(str)
-  let sig = rippleKeyPairs.sign(strHex, sk)
-  return sig
 }
 
 /**
@@ -250,18 +230,6 @@ function VerifyJsonSignature(json) {
     ConsoleWarn(`[SignatureVerify] PublicKey: ${json.PublicKey || 'MISSING'}, Error: signature mismatch`)
     return false
   }
-}
-
-/**
- * Generate a random integer in the inclusive range [min, max].
- * @param {number} min - Minimum value (inclusive)
- * @param {number} max - Maximum value (inclusive)
- * @returns {number} Random integer between min and max
- */
-function GenRandomInt(min, max) {
-  min = Math.ceil(min)
-  max = Math.floor(max)
-  return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
 /**
@@ -341,7 +309,6 @@ export {
   ConsoleError,
   ConsoleDebug,
 
-  GenSignature,
   SignJson,
   VerifyJsonSignature,
 
@@ -354,7 +321,6 @@ export {
 
   HalfSHA512,
   QuarterSHA512Message,
-  StrToHex,
   FileReadHash,
   FileBufferHash,
 
