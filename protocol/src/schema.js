@@ -982,6 +982,27 @@ const ActionSchemas = {
 };
 
 /**
+ * MessageCode -> schema for ServerNotify (ActionCode 800) messages.
+ * ServerNotify schemas all share ActionCode 800 but differ by MessageCode,
+ * so dispatch is on MessageCode.
+ */
+const ServerNotifySchemas = {
+  [MessageCode.JsonSchemaInvalid]: ServerNotifyErrorSchema,
+  [MessageCode.SignatureInvalid]: ServerNotifyErrorSchema,
+  [MessageCode.TimestampInvalid]: ServerNotifyErrorSchema,
+  [MessageCode.AddressMismatch]: ServerNotifyErrorSchema,
+  [MessageCode.KickedByNewConn]: ServerNotifyInfoSchema,
+  [MessageCode.ServerShutdown]: ServerNotifyInfoSchema,
+  [MessageCode.SyncComplete]: ServerNotifyInfoSchema,
+  [MessageCode.BulletinCached]: ServerNotifyCacheSchema,
+  [MessageCode.PrivateMsgCached]: ServerNotifyCacheSchema,
+  [MessageCode.HandshakeCached]: ServerNotifyCacheSchema,
+  [MessageCode.FileChunkReceived]: ServerNotifyFileProgressSchema,
+  [MessageCode.FileTransferComplete]: ServerNotifyFileProgressSchema,
+  [MessageCode.FileTransferFailed]: ServerNotifyFileProgressSchema
+};
+
+/**
  * ObjectType -> schema. Some ObjectTypes share a schema (GroupList items reuse
  * GroupCreate/GroupDelete; GroupMessageList has no top-level ObjectType entry
  * on the server because it is relayed rather than validated as an object).
@@ -1061,5 +1082,6 @@ export {
   // dispatch tables
   ActionSchemas,
   ObjectSchemas,
+  ServerNotifySchemas,
   MessageObjectSchemas
 };

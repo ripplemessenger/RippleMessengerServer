@@ -26,7 +26,8 @@
  */
 
 import Ajv from 'ajv';
-import { ActionSchemas, ObjectSchemas } from './schema.js';
+import { ActionSchemas, ObjectSchemas, ServerNotifySchemas } from './schema.js';
+import { ActionCode } from './constants.js';
 
 const ajv = new Ajv({ allErrors: true });
 
@@ -36,6 +37,9 @@ const compiledAction = Object.fromEntries(
 );
 const compiledObject = Object.fromEntries(
   Object.entries(ObjectSchemas).map(([type, schema]) => [type, ajv.compile(schema)])
+);
+const compiledNotify = Object.fromEntries(
+  Object.entries(ServerNotifySchemas).map(([code, schema]) => [code, ajv.compile(schema)])
 );
 
 /**
@@ -73,6 +77,18 @@ export function validateParsed(json) {
 
   if (json.ObjectType) {
     const validate = compiledObject[json.ObjectType];
+    if (!validate) return false;
+    return run(validate, json);
+  }
+
+  // ServerNotify (ActionCode 800) and ClientAck (ActionCode 810)
+  if (json.ActionCode) {
+    if (json.ActionCode === ActionCode.ServerNotify) {
+      const validate = compiledNotify[json.MessageCode];
+      if (!validate) return false;
+      return run(validate, json);
+    }
+    const validate = compiledAction[json.ActionCode];
     if (!validate) return false;
     return run(validate, json);
   }

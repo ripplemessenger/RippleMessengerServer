@@ -2369,7 +2369,7 @@ async function checkMessage(ws, message, isFromNode = false) {
 	);
 	ConsoleInfo(`${message}`);
 	// ConsoleInfo(`${message.slice(0, 512)}`)
-	const json = MsgValidate(message);
+	json = MsgValidate(message);
 	if (json === false) {
 		ConsoleWarn(
 			`[checkMessage] ❌ Schema validation FAILED for message from ${connAddress || "unknown"}, terminating connection`,
@@ -2381,6 +2381,11 @@ async function checkMessage(ws, message, isFromNode = false) {
 			),
 		);
 		terminateConn(ws, "schema_validation_failed");
+	} else if (json.ActionCode) {
+		// ServerNotify / ClientAck: control-plane messages, not actionable client requests.
+		ConsoleInfo(
+			`[checkMessage] ActionCode=${json.ActionCode} MessageCode=${json.MessageCode ?? "-"} from ${connAddress || "unknown"} (isFromNode=${isFromNode}), acknowledged`,
+		);
 	} else if (json.ObjectType) {
 		ConsoleInfo(
 			`[checkMessage] ObjectType=${json.ObjectType} from ${connAddress}`,
