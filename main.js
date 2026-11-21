@@ -1865,7 +1865,7 @@ async function fetchMediaBulletins(limit) {
 		    SELECT 1 FROM json_array_elements(b.json::json->'File') AS f
 		    WHERE lower(f->>'Ext') IN ('mp4','webm','mov','m4v','mp3','ogg','oga','opus','wav','m4a','aac','flac','jpg','jpeg','png','gif','webp','bmp','svg')
 		  )
-		ORDER BY b.signed_at DESC
+		ORDER BY random()
 		LIMIT ${take}`;
 }
 
