@@ -1860,9 +1860,9 @@ async function fetchMediaBulletins(limit) {
 	const take = Math.min(limit || 20, 100);
 	return await prisma.$queryRaw`
 		SELECT b.* FROM "Bulletin" b
-		WHERE b.json::json->'file' IS NOT NULL
+		WHERE b.json::json->'File' IS NOT NULL
 		  AND EXISTS (
-		    SELECT 1 FROM json_array_elements(b.json::json->'file') AS f
+		    SELECT 1 FROM json_array_elements(b.json::json->'File') AS f
 		    WHERE lower(f->>'Ext') IN ('mp4','webm','mov','m4v','mp3','ogg','oga','opus','wav','m4a','aac','flac','jpg','jpeg','png','gif','webp','bmp','svg')
 		  )
 		ORDER BY b.signed_at DESC
@@ -2090,7 +2090,6 @@ async function handleAction(from, message, json) {
 			}
 			if (parsedBulletin) tmp_list.push(parsedBulletin);
 		}
-
 		if (tmp_list.length > 0) {
 			const msg = GenRandomBulletinList(tmp_list);
 			SendMessage(from, msg);
