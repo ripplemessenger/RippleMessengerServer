@@ -86,6 +86,7 @@ import { MsgValidate } from "./msg_validator.js";
 
 /** Server identity & authentication — loaded from config at startup */
 let SelfURL;
+let SiteURL;
 let SelfAddress;
 let SelfPublicKey;
 let SelfPrivateKey;
@@ -2460,7 +2461,7 @@ async function checkMessage(ws, message, isFromNode = false) {
 						SyncNodeData(json.URL);
 					}
 
-					const msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL);
+					const msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL, SiteURL);
 					ConsoleInfo(`[Declare] Sending Declare to ${address}`);
 					SendMessage(address, msg);
 					// Only sync client data for actual clients, not nodes
@@ -2946,6 +2947,9 @@ async function main() {
 		ConsoleInfo(JSON.stringify(config, null, 2));
 		if (config.SelfURL !== "") {
 			SelfURL = config.SelfURL;
+		}
+		if (config.SiteURL) {
+			SiteURL = config.SiteURL;
 		}
 		NodeList = config.NodeList;
 		ConsoleInfo(JSON.stringify(NodeList, null, 2));

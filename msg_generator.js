@@ -1,13 +1,14 @@
 import { ActionCode, MessageCode, ObjectType } from "./msg_const.js";
 import { SignJson } from "./util.js";
 
-function GenDeclare(pk, sk, url) {
+function GenDeclare(pk, sk, url, siteUrl) {
 	const json = {
 		Action: ActionCode.Declare,
 		URL: url,
 		Timestamp: Date.now(),
 		PublicKey: pk,
 	};
+	if (siteUrl) json.SiteURL = siteUrl;
 	return JSON.stringify(SignJson(json, sk));
 }
 
