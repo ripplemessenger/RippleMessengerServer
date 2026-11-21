@@ -1849,6 +1849,27 @@ async function fetchRandomBulletins(limit) {
 }
 
 /**
+ * Fetch bulletins that contain media files (video/image/audio).
+ * Uses PostgreSQL JSON queries to filter bulletins whose `file` array
+ * includes at least one media extension.
+ *
+ * @param {number} limit - Maximum number of bulletins to return
+ * @returns {Promise<Array>} Raw Bulletin rows with media files
+ */
+async function fetchMediaBulletins(limit) {
+	const take = Math.min(limit || 20, 100);
+	return await prisma.$queryRaw`
+		SELECT b.* FROM "Bulletin" b
+		WHERE b.json::json->'file' IS NOT NULL
+		  AND EXISTS (
+		    SELECT 1 FROM json_array_elements(b.json::json->'file') AS f
+		    WHERE lower(f->>'Ext') IN ('mp4','webm','mov','m4v','mp3','ogg','oga','opus','wav','m4a','aac','flac','jpg','jpeg','png','gif','webp','bmp','svg')
+		  )
+		ORDER BY b.signed_at DESC
+		LIMIT ${take}`;
+}
+
+/**
  * Route an incoming message by its ActionCode. Handles client actions such as
  * BulletinRequest, BulletinSubscribe, ServerAddressRequest, ReplyBulletinRequest,
  * TagBulletinRequest, RandomBulletinRequest, FileRequest, AvatarRequest,
@@ -2052,6 +2073,23 @@ async function handleAction(from, message, json) {
 			}
 			if (parsedBulletin) tmp_list.push(parsedBulletin);
 		});
+
+		if (tmp_list.length > 0) {
+			const msg = GenRandomBulletinList(tmp_list);
+			SendMessage(from, msg);
+		}
+	} else if (json.Action === ActionCode.MediaBulletinRequest) {
+		const list = await fetchMediaBulletins(json.Limit || 20);
+		const tmp_list = [];
+		for (const bulletin of list) {
+			let parsedBulletin;
+			try {
+				parsedBulletin = JSON.parse(bulletin.json);
+			} catch {
+				parsedBulletin = null;
+			}
+			if (parsedBulletin) tmp_list.push(parsedBulletin);
+		}
 
 		if (tmp_list.length > 0) {
 			const msg = GenRandomBulletinList(tmp_list);
