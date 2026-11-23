@@ -1,5 +1,9 @@
 {
   "type": "module",
+  "scripts": {
+    "start": "tsx main.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.5.0",
@@ -10,6 +14,10 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "prisma": "^7.5.0"
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "prisma": "^7.5.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

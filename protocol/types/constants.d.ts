@@ -27,6 +27,7 @@ export declare const ActionCode: {
   readonly ReplyBulletinRequest: 404;
   readonly TagBulletinRequest: 405;
   readonly BulletinAddressListRequest: 406;
+  readonly MediaBulletinRequest: 407;
   readonly PrivateMessageSync: 501;
   readonly GroupSync: 600;
   readonly GroupMessageSync: 601;

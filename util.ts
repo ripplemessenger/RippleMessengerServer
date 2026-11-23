@@ -3,7 +3,14 @@ import crypto from 'crypto'
 import fs from 'fs'
 import { NonceMax } from './const.js'
 
-const ConsoleColors = {
+// 日志时间戳：HH:MM:SS.mmm（本地时区），用于量每条 bulletin 的间隔。
+function ts(): string {
+  const d = new Date()
+  const p = (n: number, w = 2) => String(n).padStart(w, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
+}
+
+const ConsoleColors: Record<string, string> = {
   'bright': '\x1B[1m%s\x1B[0m',
   'grey': '\x1B[2m%s\x1B[0m',
   'italic': '\x1B[3m%s\x1B[0m',
@@ -30,42 +37,41 @@ const ConsoleColors = {
 
 /**
  * Log an informational message in green.
- * @param {string} str - Message to log
  */
-function ConsoleInfo(str) {
-  console.log(ConsoleColors.green, str)
+function ConsoleInfo(str: unknown) {
+  console.log(ConsoleColors.green, `[${ts()}]`, str)
 }
 
 /**
  * Log a warning message in yellow.
- * @param {string} str - Message to log
  */
-function ConsoleWarn(str) {
-  console.log(ConsoleColors.yellow, str)
+function ConsoleWarn(str: unknown) {
+  console.log(ConsoleColors.yellow, `[${ts()}]`, str)
 }
 
 /**
  * Log an error message in red.
- * @param {string} str - Message to log
  */
-function ConsoleError(str) {
-  console.log(ConsoleColors.red, str)
+function ConsoleError(str: unknown) {
+  console.log(ConsoleColors.red, `[${ts()}]`, str)
 }
 
 /**
  * Log a debug message with red background.
- * @param {string} str - Message to log
+ *
+ * Debug output is off by default: the node-sync workload produced ~11k
+ * `[sendTo]` lines per 10 minutes, and console I/O is synchronous, so it
+ * measurably slowed message handling. Set `RMS_DEBUG=1` to turn it back on.
  */
-function ConsoleDebug(str) {
-  console.log(ConsoleColors.redBG, str)
+function ConsoleDebug(str: unknown) {
+  if (!process.env.RMS_DEBUG) return
+  console.log(ConsoleColors.redBG, `[${ts()}]`, str)
 }
 
 /**
  * Sleep for the specified number of milliseconds.
- * @param {number} ms - Milliseconds to delay
- * @returns {Promise<void>}
  */
-async function DelayExec(ms) {
+async function DelayExec(ms: number): Promise<void> {
   return new Promise(resolve => {
     setTimeout(resolve, ms)
   })
@@ -76,30 +82,24 @@ const url_regex = /^wss:\/\/(?!-)([a-zA-Z0-9-]+)(?<!-)\.(?!-)([a-zA-Z0-9-]+)(?<!
 
 /**
  * Validate a WebSocket server URL against the expected wss:// pattern.
- * @param {string} url - The URL to validate
- * @returns {boolean} True if the URL matches the expected format
  */
-function CheckServerURL(url) {
+function CheckServerURL(url: string): boolean {
   return url_regex.test(url)
 }
 
 // json
 /**
  * Deep-clone a JSON-compatible object using structuredClone.
- * @param {*} json - The object to clone
- * @returns {*} A deep copy of the input object
  */
-function CloneJson(json) {
+function CloneJson<T>(json: T): T {
   return structuredClone(json)
 }
 
 /**
  * Remove duplicate elements from an array. For objects, uses JSON.stringify as the key.
- * @param {Array} arr - Input array possibly containing duplicates
- * @returns {Array} Array with duplicates removed (first occurrence preserved)
  */
-function UniqArray(arr) {
-  const seen = new Set()
+function UniqArray(arr: unknown[]): unknown[] {
+  const seen = new Set<unknown>()
   return arr.filter(item => {
     const key = typeof item === 'object' ? JSON.stringify(item) : item
     if (seen.has(key)) return false
@@ -111,10 +111,8 @@ function UniqArray(arr) {
 /**
  * Convert an array of strings to a comma-separated quoted string.
  * Elements are appended in reverse order (last element first).
- * @param {string[]} array - Array of strings to join
- * @returns {string} Comma-separated double-quoted string
  */
-function Array2Str(array) {
+function Array2Str(array: string[]): string {
   let tmpArray = []
   for (let i = array.length - 1; i >= 0; i--) {
     tmpArray.push(`"${array[i]}"`)
@@ -125,10 +123,8 @@ function Array2Str(array) {
 // crypto
 /**
  * Compute the full SHA-512 hash of a string.
- * @param {string} str - Input string to hash
- * @returns {string} 128-character lowercase hex digest
  */
-function HasherSHA512(str) {
+function HasherSHA512(str: string | Buffer | Uint8Array): string {
   let sha512 = crypto.createHash("sha512")
   sha512.update(str)
   return sha512.digest('hex')
@@ -136,29 +132,23 @@ function HasherSHA512(str) {
 
 /**
  * Compute the first 64 hex characters (half) of a SHA-512 hash, uppercase.
- * @param {string} str - Input string to hash
- * @returns {string} 64-character uppercase hex string
  */
-function HalfSHA512(str) {
+function HalfSHA512(str: string | Buffer | Uint8Array): string {
   return HasherSHA512(str).toUpperCase().substring(0, 64)
 }
 
 /**
  * Compute the first 32 hex characters (quarter) of a SHA-512 hash, uppercase.
- * @param {string} str - Input string to hash
- * @returns {string} 32-character uppercase hex string
  */
-function QuarterSHA512(str) {
+function QuarterSHA512(str: string | Buffer | Uint8Array): string {
   return HasherSHA512(str).toUpperCase().substring(0, 32)
 }
 
 /**
  * Compute the first 32 hex characters (quarter) of a SHA-512 hash on the
  * JSON-stringified representation of any value. Used for message hashing.
- * @param {string|object} data - String or object to hash
- * @returns {string} 32-character uppercase hex string
  */
-function QuarterSHA512Message(data) {
+function QuarterSHA512Message(data: string | Record<string, unknown>): string {
   const dataStr = typeof data === 'object' ? JSON.stringify(data) : String(data)
   return HasherSHA512(dataStr).toUpperCase().substring(0, 32)
 }
@@ -170,11 +160,8 @@ function QuarterSHA512Message(data) {
  * event loop shared by every WebSocket connection, so a synchronous read of a
  * large attachment would stall all client traffic (and spike memory) for the
  * duration of the read + hash.
- *
- * @param {string} file_path - Absolute or relative path to the file
- * @returns {Promise<string|null>} 32-character hex hash, or null on read error
  */
-function FileReadHash(file_path) {
+function FileReadHash(file_path: string): Promise<string | null> {
   return new Promise((resolve) => {
     const hasher = crypto.createHash('sha512')
     const stream = fs.createReadStream(file_path)
@@ -189,10 +176,8 @@ function FileReadHash(file_path) {
 
 /**
  * Compute the quarter-SHA-512 hash of a Buffer or Uint8Array.
- * @param {Buffer|Uint8Array} buffer - Binary data to hash
- * @returns {string} 32-character uppercase hex hash
  */
-function FileBufferHash(buffer) {
+function FileBufferHash(buffer: Buffer | Uint8Array): string {
   const hash = QuarterSHA512(buffer)
   return hash
 }
@@ -200,11 +185,8 @@ function FileBufferHash(buffer) {
 /**
  * Sign a JSON object by computing its quarter-SHA-512 message hash, signing it,
  * and attaching the Signature field. The original object is not mutated.
- * @param {object} json - Object to sign
- * @param {string} sk - Secret key (hex-encoded)
- * @returns {object} New object with all original fields plus a Signature field
  */
-function SignJson(json, sk) {
+function SignJson(json: Record<string, unknown>, sk: string): Record<string, unknown> {
   const json_hash = QuarterSHA512Message(json)
   let sig = rippleKeyPairs.sign(json_hash, sk)
   const signed = { ...json, Signature: sig }
@@ -215,15 +197,13 @@ function SignJson(json, sk) {
  * Verify an EdDSA signature on a JSON object. Computes the quarter-SHA-512 hash
  * of the object (excluding the Signature field), then verifies against the
  * PublicKey and Signature fields.
- * @param {object} json - Object with Signature, PublicKey, and arbitrary data fields
- * @returns {boolean} True if the signature is valid for the public key
  */
-function VerifyJsonSignature(json) {
+function VerifyJsonSignature(json: Record<string, unknown>): boolean {
   const sig = json.Signature
   const verifyCopy = { ...json }
   delete verifyCopy.Signature
   const json_hash = QuarterSHA512Message(verifyCopy)
-  if (rippleKeyPairs.verify(json_hash, sig, json.PublicKey)) {
+  if (rippleKeyPairs.verify(json_hash, sig as string, json.PublicKey as string)) {
     return true
   } else {
     ConsoleWarn('json signature invalid...')
@@ -234,20 +214,16 @@ function VerifyJsonSignature(json) {
 
 /**
  * Generate a cryptographically random 32-bit nonce in [0, NonceMax].
- * @returns {number} Random unsigned 32-bit integer
  */
-function genNonce() {
+function genNonce(): number {
   return crypto.randomInt(0, NonceMax + 1)
 }
 
 /**
  * Calculate the total number of pages given a total count and page size.
  * Rounds up to the next integer.
- * @param {number} total - Total number of items
- * @param {number} page_size - Number of items per page
- * @returns {number} Total number of pages (minimum 0)
  */
-function calcTotalPage(total, page_size) {
+function calcTotalPage(total: number, page_size: number): number {
   let total_page = Math.floor(total / page_size)
   if (total_page !== total / page_size) {
     total_page = total_page + 1
@@ -257,11 +233,8 @@ function calcTotalPage(total, page_size) {
 
 /**
  * Convert a 32-bit unsigned integer to a 4-byte Buffer.
- * @param {number} num - Unsigned 32-bit integer (0-4294967295)
- * @param {boolean} [isBigEndian=true] - If true, use big-endian byte order
- * @returns {Buffer|false} 4-byte buffer, or false if num is out of range
  */
-function Uint32ToBuffer(num, isBigEndian = true) {
+function Uint32ToBuffer(num: number, isBigEndian = true): Buffer | false {
   if (num < 0 || num > 4294967295) {
     return false
   }
@@ -276,23 +249,20 @@ function Uint32ToBuffer(num, isBigEndian = true) {
 
 /**
  * Read a 32-bit unsigned integer from a Buffer or Uint8Array.
- * @param {Buffer|Uint8Array} buf - At least 4 bytes of data
- * @param {boolean} [isBigEndian=true] - If true, use big-endian byte order
- * @returns {number} Unsigned 32-bit integer
+ * The runtime value at the sole call site is a Buffer (V8's TypedArray.slice
+ * preserves the constructor), so readUInt32BE/LE are available.
  */
-function BufferToUint32(buf, isBigEndian = true) {
+function BufferToUint32(buf: Buffer | Uint8Array, isBigEndian = true): number {
   return isBigEndian
-    ? buf.readUInt32BE(0)
-    : buf.readUInt32LE(0)
+    ? (buf as Buffer).readUInt32BE(0)
+    : (buf as Buffer).readUInt32LE(0)
 }
 
 /**
  * Shuffle an array using the Fisher-Yates algorithm. Returns a new array,
  * does not mutate the original.
- * @param {Array} arr - Input array to shuffle
- * @returns {Array} New array with elements in random order
  */
-function shuffleArray(arr) {
+function shuffleArray(arr: unknown[]): unknown[] {
   const newArr = [...arr]
   let len = newArr.length
   while (len > 1) {

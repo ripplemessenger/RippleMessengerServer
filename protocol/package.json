@@ -28,9 +28,10 @@
     "types"
   ],
   "scripts": {
-    "test": "node scripts/schema-parity.mjs && node scripts/parity-test.mjs",
+    "test": "node scripts/schema-parity.mjs && node scripts/parity-test.mjs && node scripts/types-parity.mjs",
     "test:schema": "node scripts/schema-parity.mjs",
-    "test:behavior": "node scripts/parity-test.mjs"
+    "test:behavior": "node scripts/parity-test.mjs",
+    "test:types": "node scripts/types-parity.mjs"
   },
   "keywords": [
     "ripplemessenger",

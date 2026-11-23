@@ -44,7 +44,7 @@ const SNAPSHOT = (() => {
 // are pinned by test/fixtures too. Keep the live read for a cheap sanity check.
 let oldConst = {};
 try {
-  oldConst = await import('../../../RippleMessengerServer/msg_const.js');
+  oldConst = await import('../../../Server/msg_const.js');
 } catch {
   oldConst = {};
 }

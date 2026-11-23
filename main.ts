@@ -15,7 +15,6 @@ import {
 	ConsoleWarn,
 	ConsoleError,
 	ConsoleDebug,
-	DelayExec,
 	FileReadHash,
 	QuarterSHA512Message,
 	UniqArray,
@@ -85,38 +84,184 @@ import { MsgValidate } from "./msg_validator.js";
  */
 
 /** Server identity & authentication — loaded from config at startup */
-let SelfURL;
-let SiteURL;
-let SelfAddress;
-let SelfPublicKey;
-let SelfPrivateKey;
+let SelfURL: string | undefined;
+let SiteURL: string | undefined;
+let SelfAddress: string;
+let SelfPublicKey: string;
+let SelfPrivateKey: string;
 
 /** Remote peer-node network: list of all nodes + whitelist of allowed addresses */
-let NodeList = [];
-let WhiteList = [];
+let NodeList: { URL: string }[] = [];
+let WhiteList: string[] = [];
 
-function isAllowed(address) {
+function isAllowed(address: string): boolean {
 	if (WhiteList.length === 0) return true;
 	return WhiteList.includes(address);
 }
 
 /** Client-server daemon and active WebSocket connections keyed by address or URL */
-let ServerDaemon = null;
-const Conns = {}; // client connections: address -> WebSocket
-let jobNodeConn = null; // interval timer for reconnecting dropped node links
-let jobNodeSync = null; // interval timer for periodic bulletin sync across nodes
-let jobFilePurge = null; // interval timer for purging expired file requests
-const NodeConns = {}; // node-to-node connections: URL -> WebSocket
+let ServerDaemon: WebSocketServer | null = null;
+const Conns: Record<string, WebSocket> = {}; // client connections: address -> WebSocket
+let jobNodeConn: NodeJS.Timeout | null = null; // interval timer for reconnecting dropped node links
+let jobNodeSync: NodeJS.Timeout | null = null; // interval timer for periodic bulletin sync across nodes
+let jobFilePurge: NodeJS.Timeout | null = null; // interval timer for purging expired file requests
+const NodeConns: Record<string, WebSocket> = {}; // node-to-node connections: URL -> WebSocket
 
 /** Pending file-transfer requests queued while awaiting binary chunks */
-const fileRequestList = new Map();
+interface FileRequestEntry {
+	Type: number;
+	Nonce: number;
+	Hash: string;
+	Address?: string;
+	From?: string;
+	To?: string;
+	ChunkCursor?: number;
+	NodeUrl?: string;
+	Timestamp: number;
+	GroupHash?: string;
+}
+
+const fileRequestList = new Map<number, FileRequestEntry>();
+
+// Retry cap for bulletin file downloads: a file that keeps hash-mismatching
+// (or whose re-request keeps failing) is abandoned after this many attempts
+// instead of looping forever and stalling the sync pipeline.
+const MAX_FILE_RETRIES = 3;
+const fileRetryCount = new Map<string, number>();
+
+// --- Paced bulletin-file fetching -------------------------------------------------
+// A full sync can surface ~90 file downloads at once when the bulletins land.
+// Firing every request immediately saturated the peer node's message pipeline and
+// starved bulletin sync: with files flowing the cache advanced ~50 bulletins/120s,
+// with file fetching paused it reached 302 bulletins/75s. Two rules keep the peer
+// responsive:
+//   1. bulletin sync has priority — no file is started while bulletins still flow;
+//   2. at most ONE file request is outstanding at a time, and the next is only
+//      released when the previous file lands (or times out).
+// The peer serves a file for tens of seconds and processes our frames from one
+// queue, so a larger backlog would block every bulletin round-trip behind it.
+interface FileFetchJob {
+	from: string;
+	address: string;
+	hash: string;
+	cursor: number;
+	viaNode: boolean;
+}
+/** FIFO of hashes waiting for a slot. */
+const fileFetchQueue: string[] = [];
+/** Original request for every hash that is queued or in flight (needed to retry). */
+const fileFetchJobs = new Map<string, FileFetchJob>();
+let fileFetchTimer: NodeJS.Timeout | null = null;
+
+const FILE_FETCH_QUIET_MS = 4000;
+// A request entry lives FILE_REQUEST_TTL_MS (120s) in fileRequestList. If the peer
+// has not answered by then the entry is purged and the chunk arrives as an
+// "Unknown nonce" — the file would be silently abandoned. The slot is therefore
+// released when the request stops being outstanding, and the file is re-queued
+// for another attempt (bounded by MAX_FILE_RETRIES).
+const FILE_FETCH_TICK_MS = 1000;
+// The peer serves roughly one chunk per 10-25s. A small window hides that latency
+// without building a node-side queue deep enough to starve bulletin sync or to
+// push a file's first chunk past its TTL.
+const FILE_FETCH_MAX_INFLIGHT = 2;
+let lastBulletinAt = 0;
+const fileFetchInFlight = new Map<string, number>();
+
+/** True while a queued request for this hash is still waiting on the peer. */
+function hasOutstandingFileRequest(hash: string): boolean {
+	for (const r of fileRequestList.values()) {
+		if (r.Hash === hash) return true;
+	}
+	return false;
+}
+
+/** Release an in-flight slot once a queued download finishes. */
+function markFileFetchDone(hash: string): void {
+	fileFetchInFlight.delete(hash);
+	fileFetchJobs.delete(hash);
+}
+
+/** Queue a bulletin file download instead of requesting it immediately. */
+function enqueueFileFetch(
+	from: string,
+	address: string,
+	hash: string,
+	cursor: number,
+	viaNode = false,
+): void {
+	if (fileFetchJobs.has(hash)) return;
+	fileFetchJobs.set(hash, { from, address, hash, cursor, viaNode });
+	fileFetchQueue.push(hash);
+	pumpFileFetchQueue();
+}
+
+function pumpFileFetchQueue(): void {
+	if (fileFetchTimer !== null) return;
+	fileFetchTimer = setInterval(() => {
+		if (fileFetchQueue.length === 0 && fileFetchInFlight.size === 0) {
+			if (fileFetchTimer !== null) clearInterval(fileFetchTimer);
+			fileFetchTimer = null;
+			return;
+		}
+		const now = Date.now();
+		for (const [hash, startedAt] of fileFetchInFlight) {
+			// A multi-chunk file legitimately stays in flight for minutes, and every
+			// answered chunk re-registers the next one — so "still waiting on the
+			// peer" is the only correct progress signal. A time-based timeout here
+			// would restart a healthy download from chunk 1.
+			if (hasOutstandingFileRequest(hash)) continue;
+			// No request left: the peer's answer was consumed (the file finished and
+			// markFileFetchDone already dropped it) or the entry expired unanswered.
+			fileFetchInFlight.delete(hash);
+			const attempts = fileRetryCount.get(hash) ?? 0;
+			if (attempts >= MAX_FILE_RETRIES) {
+				ConsoleWarn(
+					`[fileFetchQueue] ${hash}: giving up after ${attempts} queued attempts`,
+				);
+				fileRetryCount.delete(hash);
+				fileFetchJobs.delete(hash);
+				continue;
+			}
+			fileRetryCount.set(hash, attempts + 1);
+			ConsoleWarn(
+				`[fileFetchQueue] ${hash}: request expired without a chunk after ${Math.round((now - startedAt) / 1000)}s, re-queued (attempt ${attempts + 1}/${MAX_FILE_RETRIES})`,
+			);
+			fileFetchQueue.push(hash);
+		}
+		if (fileFetchInFlight.size >= FILE_FETCH_MAX_INFLIGHT) {
+			// Enough downloads are already outstanding.
+			return;
+		}
+		if (now - lastBulletinAt < FILE_FETCH_QUIET_MS) {
+			// Bulletin sync still running — let it finish first.
+			return;
+		}
+		const nextHash = fileFetchQueue.shift();
+		if (nextHash === undefined) return;
+		const job = fileFetchJobs.get(nextHash);
+		if (job === undefined) return;
+		fileFetchInFlight.set(job.hash, now);
+		try {
+			if (job.viaNode) {
+				fetchFileFromNode(job.from, job.address, job.hash, job.cursor);
+			} else {
+				fetchBulletinFile(job.from, job.address, job.hash, job.cursor);
+			}
+		} catch (e: any) {
+			ConsoleWarn(
+				`[fileFetchQueue] failed to request ${job.hash}: ${(e as Error).message}`,
+			);
+		}
+	}, FILE_FETCH_TICK_MS);
+	if (typeof fileFetchTimer.unref === "function") fileFetchTimer.unref();
+}
 
 /** Group membership map (group_hash -> member list) and subscription map (address -> subscribed addresses) */
-const groupMap = {};
-const subscribeMap = {};
+const groupMap: Record<string, string[]> = {};
+const subscribeMap: Record<string, string[]> = {};
 
 /** Track which addresses have already had N+1 confirmation sent during Declare-triggered sync */
-const syncConfirmSent = {};
+const syncConfirmSent: Record<string, unknown> = {};
 
 /**
  * Throttle for PrivateMessageSync: detects a client-side sync loop. If the same
@@ -126,7 +271,12 @@ const syncConfirmSent = {};
  * the server is not flooded. A legitimate re-sync changes the sequences and resets
  * the counter. Key: `${from}:${to}`.
  */
-const privateSyncThrottle = new Map();
+const privateSyncThrottle = new Map<string, {
+	selfSeq: number;
+	pairSeq: number;
+	count: number;
+	windowStart: number;
+}>();
 const PRIVATE_SYNC_MAX = 5;
 const PRIVATE_SYNC_WINDOW_MS = 10000;
 
@@ -142,7 +292,7 @@ const PRIVATE_SYNC_WINDOW_MS = 10000;
  * Key: address → { seq, ts }. Only re-request the SAME gap after
  * BACKFILL_MIN_INTERVAL_MS; if the gap moved (it got filled), request at once.
  */
-const backfillThrottle = new Map();
+const backfillThrottle = new Map<string, { seq: number; ts: number }>();
 const BACKFILL_MIN_INTERVAL_MS = 10 * 1000;
 const BACKFILL_THROTTLE_MAX_ENTRIES = 5000;
 
@@ -152,7 +302,7 @@ const BACKFILL_THROTTLE_MAX_ENTRIES = 5000;
  * @param {number} seq - Missing sequence being requested
  * @returns {boolean} True if the request should be sent
  */
-function shouldRequestBackfill(address, seq) {
+function shouldRequestBackfill(address: string, seq: number): boolean {
 	const now = Date.now();
 	const prev = backfillThrottle.get(address);
 	if (prev && prev.seq === seq && now - prev.ts < BACKFILL_MIN_INTERVAL_MS) {
@@ -173,11 +323,13 @@ function shouldRequestBackfill(address, seq) {
  * the supervisor (pm2/systemd) restart a clean process. This also matches Node's
  * own default behaviour, which the previous log-only handlers were suppressing.
  */
-function fatalExit(label, detail) {
+function fatalExit(label: string, detail: unknown): void {
 	ConsoleError(`[${label}] Process state is undefined — exiting for a clean restart.`);
 	try {
-		if (detail && detail.stack) ConsoleError(detail.stack);
-	} catch {}
+		if (detail && (detail as { stack?: string }).stack) ConsoleError((detail as { stack?: string }).stack);
+	} catch {
+		/* best-effort: stack may not be printable; never block the exit */
+	}
 	// Best-effort flush; never let cleanup prevent the exit.
 	Promise.resolve()
 		.then(() => prisma.$disconnect())
@@ -197,10 +349,11 @@ process.on("unhandledRejection", (reason) => {
 	fatalExit("unhandledRejection", reason);
 });
 
-function fetchConnAddress(ws) {
-	return ws._connAddress ?? null;
-}function fetchNodeConnURL(ws) {
-	return ws._nodeUrl ?? null;
+function fetchConnAddress(ws: WebSocket): string | null {
+	return (ws as any)._connAddress ?? null;
+}
+function fetchNodeConnURL(ws: WebSocket): string | null {
+	return (ws as any)._nodeUrl ?? null;
 }
 
 /**
@@ -209,7 +362,7 @@ function fetchConnAddress(ws) {
  * and either forwards the raw data (private/group chat) or persists to disk.
  * @param {Uint8Array} data - Raw binary frame containing nonce + file chunk data
  */
-async function handleBinaryMessage(data) {
+async function handleBinaryMessage(data: any): Promise<void> {
 	const nonce = BufferToUint32(Uint8Array.prototype.slice.call(data, 0, 4));
 	const content = Uint8Array.prototype.slice.call(data, 4);
 	const request = fileRequestList.get(nonce);
@@ -226,7 +379,7 @@ async function handleBinaryMessage(data) {
 		request.Type === FileRequestType.PrivateChatFile ||
 		request.Type === FileRequestType.GroupChatFile
 	) {
-		if (!isAllowed(request.From)) {
+		if (!isAllowed(request.From as string)) {
 			ConsoleWarn(
 				`[Chat Filter] Blocked binary file forward to ${request.From} (type=${request.Type})`,
 			);
@@ -235,15 +388,21 @@ async function handleBinaryMessage(data) {
 		}
 		// forward file data to the destination peer
 		removeFileRequestByNonce(request.Nonce);
-		SendMessage(request.From, data);
+		SendMessage(request.From as string, data);
 	} else {
 		await saveBufferFile(request, content);
 	}
 }
 
-function broadcastBulletinToNodes(bulletin) {
+function broadcastBulletinToNodes(bulletin: unknown, excludeAddr?: string): void {
 	const jsonStr = JSON.stringify(bulletin);
 	for (const url in NodeConns) {
+		// Don't echo a bulletin back to the peer that just handed it to us: it
+		// already has it, and the echo re-triggers its own chase logic. Other
+		// nodes still receive it.
+		if (excludeAddr !== undefined && fetchConnAddress(NodeConns[url]) === excludeAddr) {
+			continue;
+		}
 		SendToNode(url, jsonStr);
 	}
 }
@@ -254,7 +413,7 @@ function broadcastBulletinToNodes(bulletin) {
  * Checks both client connections (by address) and node connections (by URL).
  * @param {WebSocket} ws - The WebSocket instance to terminate
  */
-function terminateConn(ws, reason = "unknown") {
+function terminateConn(ws: WebSocket, reason = "unknown"): void {
 	ConsoleWarn(`[terminateConn] Closing connection — reason: ${reason}`);
 	ws.close();
 	const connAddress = fetchConnAddress(ws);
@@ -286,7 +445,7 @@ function genFileNonce() {
 }
 
 /** Remove a file-transfer request from fileRequestList by its nonce. */
-function removeFileRequestByNonce(nonce) {
+function removeFileRequestByNonce(nonce: number): void {
 	fileRequestList.delete(nonce);
 }
 
@@ -307,7 +466,7 @@ function purgeExpiredFileRequests() {
 	}
 }
 
-function purgeFileRequestsByHashAddress(hash, address) {
+function purgeFileRequestsByHashAddress(hash: string, address: string): void {
 	for (const [nonce, r] of fileRequestList) {
 		if (r.Hash === hash && r.Address === address) {
 			fileRequestList.delete(nonce);
@@ -315,7 +474,7 @@ function purgeFileRequestsByHashAddress(hash, address) {
 	}
 }
 
-function purgeFileRequestsByHashFrom(hash, from) {
+function purgeFileRequestsByHashFrom(hash: string, from: string): void {
 	for (const [nonce, r] of fileRequestList) {
 		if (r.Hash === hash && r.From === from) {
 			fileRequestList.delete(nonce);
@@ -333,17 +492,28 @@ function purgeFileRequestsByHashFrom(hash, from) {
  * @param {boolean} doCleanup - If true, purge expired + duplicate entries before push
  * @returns {void}
  */
-function requestFile(from, type, hash, chunkCursor, address, doCleanup) {
+function requestFile(
+	from: string,
+	type: number,
+	hash: string,
+	chunkCursor: number,
+	address: string,
+	doCleanup: boolean,
+): void {
 	const nonce = genFileNonce();
 	const tmp = {
 		Type: type,
 		Nonce: nonce,
 		Hash: hash,
 		Address: address,
+		// Remember the peer we asked for the file so a re-request after a
+		// hash mismatch goes back to that peer (the node holding the file),
+		// NOT to the bulletin signer (which has no open WS connection).
+		From: from,
 		Timestamp: Date.now(),
 	};
 	if (chunkCursor > 1) {
-		tmp.ChunkCursor = chunkCursor;
+		(tmp as { ChunkCursor?: number }).ChunkCursor = chunkCursor;
 	}
 	if (doCleanup) {
 		purgeExpiredFileRequests();
@@ -364,11 +534,11 @@ function requestFile(from, type, hash, chunkCursor, address, doCleanup) {
 	SendMessage(from, msg);
 }
 
-function fetchAvatarFile(from, address, hash) {
+function fetchAvatarFile(from: string, address: string, hash: string): void {
 	requestFile(from, FileRequestType.Avatar, hash, 1, address, false);
 }
 
-function fetchBulletinFile(from, address, hash, chunk_cursor) {
+function fetchBulletinFile(from: string, address: string, hash: string, chunk_cursor: number): void {
 	requestFile(from, FileRequestType.File, hash, chunk_cursor, address, true);
 }
 
@@ -379,26 +549,26 @@ function fetchBulletinFile(from, address, hash, chunk_cursor) {
  * @param {number} type - FileRequestType enum value (PrivateChatFile or GroupChatFile)
  * @returns {void}
  */
-function cacheFileRequest(from, json, type) {
-	const tmp = {
+function cacheFileRequest(from: string, json: Record<string, unknown>, type: number): void {
+	const tmp: FileRequestEntry = {
 		Type: type,
-		Nonce: json.Nonce,
+		Nonce: json.Nonce as number,
 		From: from,
 		// To: json.To,
-		Hash: json.Hash,
+		Hash: json.Hash as string,
 		// ChunkCursor: json.ChunkCursor,
-		Timestamp: json.Timestamp,
+		Timestamp: json.Timestamp as number,
 	};
 	purgeExpiredFileRequests();
-	purgeFileRequestsByHashFrom(json.Hash, from);
-	fileRequestList.set(json.Nonce, tmp);
+	purgeFileRequestsByHashFrom(json.Hash as string, from);
+	fileRequestList.set(json.Nonce as number, tmp);
 }
 
-function cachePrivateFileRequest(from, json) {
+function cachePrivateFileRequest(from: string, json: Record<string, unknown>): void {
 	cacheFileRequest(from, json, FileRequestType.PrivateChatFile);
 }
 
-function cacheGroupFileRequest(from, json) {
+function cacheGroupFileRequest(from: string, json: Record<string, unknown>): void {
 	cacheFileRequest(from, json, FileRequestType.GroupChatFile);
 }
 
@@ -409,27 +579,27 @@ function cacheGroupFileRequest(from, json) {
  * @param {Uint8Array} content - Raw file chunk data received via WebSocket binary frame
  * @returns {Promise<void>}
  */
-async function saveBufferFile(request, content) {
+async function saveBufferFile(request: FileRequestEntry, content: any): Promise<void> {
 	switch (request.Type) {
 		case FileRequestType.Avatar: {
 			const content_hash = FileBufferHash(content);
 			if (request.Hash === content_hash) {
-				const avatar_dir = `./${AvatarDir}/${request.Address.substring(1, 4)}/${request.Address.substring(4, 7)}`;
+				const avatar_dir = `./${AvatarDir}/${(request.Address as string).substring(1, 4)}/${(request.Address as string).substring(4, 7)}`;
 				await fsp.mkdir(path.resolve(avatar_dir), { recursive: true });
-				const avatar_path = `${avatar_dir}/${request.Address}.png`;
+				const avatar_path = `${avatar_dir}/${request.Address as string}.png`;
 				try {
 					await fsp.writeFile(avatar_path, content);
 					removeFileRequestByNonce(request.Nonce);
-					await prisma.Avatar.update({
+					await prisma.avatar.update({
 						where: {
-							address: request.Address,
+							address: request.Address as string,
 						},
 						data: {
 							is_saved: true,
 						},
 					});
-				} catch (err) {
-					ConsoleWarn(err.message);
+				} catch (err: any) {
+					ConsoleWarn((err as Error).message);
 				}
 			}
 			break;
@@ -438,7 +608,7 @@ async function saveBufferFile(request, content) {
 			const file_dir = `./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}`;
 			await fsp.mkdir(path.resolve(file_dir), { recursive: true });
 			const file_path = `${file_dir}/${request.Hash}`;
-			const file = await prisma.File.findFirst({
+			const file = await prisma.file.findFirst({
 				where: {
 					AND: {
 						hash: request.Hash,
@@ -456,6 +626,7 @@ async function saveBufferFile(request, content) {
 				ConsoleWarn(
 					`[saveBufferFile] ${request.Hash}: file record not found or already saved`,
 				);
+				markFileFetchDone(request.Hash);
 			} else {
 				// ChunkCursor is only set when cursor > 1 in requestFile;
 				// default to 1 for the first chunk
@@ -465,7 +636,7 @@ async function saveBufferFile(request, content) {
 						`[saveBufferFile] ${request.Hash}: cursor at end (${file.chunk_length}), resetting to 0`,
 					);
 					await fsp.rm(path.resolve(file_path), { force: true });
-					await prisma.File.update({
+					await prisma.file.update({
 						where: {
 							hash: request.Hash,
 						},
@@ -474,9 +645,11 @@ async function saveBufferFile(request, content) {
 						},
 					});
 					if (request.NodeUrl) {
-						fetchFileFromNode(request.NodeUrl, request.Address, request.Hash, 1);
+						fetchFileFromNode(request.NodeUrl, request.Address as string, request.Hash, 1);
+					} else if (request.From) {
+						fetchBulletinFile(request.From, request.Address as string, request.Hash, 1);
 					} else {
-						fetchBulletinFile(request.Address, request.Address, request.Hash, 1);
+						fetchBulletinFile(request.Address as string, request.Address as string, request.Hash, 1);
 					}
 				} else if (
 					file.chunk_cursor < file.chunk_length &&
@@ -492,7 +665,7 @@ async function saveBufferFile(request, content) {
 								`(${writtenBefore + content.length} > ${file.size}), resetting`,
 						);
 						await fsp.rm(path.resolve(file_path), { force: true });
-						await prisma.File.update({
+						await prisma.file.update({
 							where: {
 								hash: request.Hash,
 							},
@@ -502,6 +675,13 @@ async function saveBufferFile(request, content) {
 						});
 						return;
 					}
+					// Defensive: if this is the first chunk, delete any stale
+					// partial file left on disk by a prior failed attempt so we
+					// don't append to it (which would corrupt the content and
+					// cause a spurious hash mismatch).
+					if (file.chunk_cursor === 0) {
+						await fsp.rm(path.resolve(file_path), { force: true });
+					}
 					ConsoleInfo(
 						`[saveBufferFile] ${request.Hash}: saving chunk ${expectedCursor}/${file.chunk_length} (${content.length} bytes)`,
 					);
@@ -509,7 +689,7 @@ async function saveBufferFile(request, content) {
 						await fsp.appendFile(file_path, Buffer.from(content));
 						removeFileRequestByNonce(request.Nonce);
 						const current_chunk_cursor = file.chunk_cursor + 1;
-						await prisma.File.update({
+						await prisma.file.update({
 							where: {
 								hash: request.Hash,
 							},
@@ -525,14 +705,24 @@ async function saveBufferFile(request, content) {
 							if (request.NodeUrl) {
 								fetchFileFromNode(
 									request.NodeUrl,
-									request.Address,
+									request.Address as string,
+									request.Hash,
+									current_chunk_cursor + 1,
+								);
+							} else if (request.From) {
+								// Use the node (request.From) that sent the current chunk,
+								// NOT the bulletin signer (request.Address) which has no
+								// open WS connection.
+								fetchBulletinFile(
+									request.From as string,
+									request.Address as string,
 									request.Hash,
 									current_chunk_cursor + 1,
 								);
 							} else {
 								fetchBulletinFile(
-									request.Address,
-									request.Address,
+									request.Address as string,
+									request.Address as string,
 									request.Hash,
 									current_chunk_cursor + 1,
 								);
@@ -546,7 +736,9 @@ async function saveBufferFile(request, content) {
 								ConsoleInfo(
 									`[saveBufferFile] ${request.Hash}: ✅ File saved successfully! (${file.size} bytes)`,
 								);
-								await prisma.File.update({
+								fileRetryCount.delete(request.Hash);
+								markFileFetchDone(request.Hash);
+								await prisma.file.update({
 									where: {
 										hash: request.Hash,
 									},
@@ -555,11 +747,21 @@ async function saveBufferFile(request, content) {
 									},
 								});
 							} else {
+								const retries = fileRetryCount.get(request.Hash) ?? 0;
+								if (retries >= MAX_FILE_RETRIES) {
+									ConsoleWarn(
+										`[saveBufferFile] ${request.Hash}: ❌ Giving up after ${MAX_FILE_RETRIES} retries (persistent hash mismatch)`,
+									);
+									fileRetryCount.delete(request.Hash);
+									markFileFetchDone(request.Hash);
+									return;
+								}
+								fileRetryCount.set(request.Hash, retries + 1);
 								ConsoleWarn(
-									`[saveBufferFile] ${request.Hash}: ❌ HASH MISMATCH! expected=${request.Hash}, got=${hash}`,
+									`[saveBufferFile] ${request.Hash}: ❌ HASH MISMATCH! expected=${request.Hash}, got=${hash} (retry ${retries + 1}/${MAX_FILE_RETRIES})`,
 								);
 								await fsp.rm(path.resolve(file_path), { force: true });
-								await prisma.File.update({
+								await prisma.file.update({
 									where: {
 										hash: request.Hash,
 									},
@@ -568,21 +770,24 @@ async function saveBufferFile(request, content) {
 									},
 								});
 								if (request.NodeUrl) {
-									fetchFileFromNode(request.NodeUrl, request.Address, request.Hash, 1);
+									fetchFileFromNode(request.NodeUrl, request.Address as string, request.Hash, 1);
+								} else if (request.From) {
+									fetchBulletinFile(request.From, request.Address as string, request.Hash, 1);
 								} else {
-									fetchBulletinFile(request.Address, request.Address, request.Hash, 1);
+									fetchBulletinFile(request.Address as string, request.Address as string, request.Hash, 1);
 								}
 							}
 						}
-					} catch (err) {
+					} catch (err: any) {
 						ConsoleWarn(
-							`[saveBufferFile] Failed to append file chunk: ${err.message}`,
+							`[saveBufferFile] Failed to append file chunk: ${(err as Error).message}`,
 						);
 					}
 				} else {
 					ConsoleWarn(
 						`[saveBufferFile] ${request.Hash}: ❌ Unexpected cursor! expected=${file.chunk_cursor + 1}, got=${expectedCursor}, cursor=${file.chunk_cursor}, length=${file.chunk_length}`,
 					);
+					markFileFetchDone(request.Hash);
 				}
 			}
 			break;
@@ -592,13 +797,13 @@ async function saveBufferFile(request, content) {
 	}
 }
 
-async function HandleFileRequest(request, from) {
+async function HandleFileRequest(request: Record<string, unknown>, from: string): Promise<void> {
 	// send cache file
 	switch (request.FileType) {
 		case FileRequestType.Avatar: {
-			const avatar = await prisma.Avatar.findFirst({
+			const avatar = await prisma.avatar.findFirst({
 				where: {
-					hash: request.Hash,
+					hash: request.Hash as string,
 				},
 				select: {
 					address: true,
@@ -614,15 +819,15 @@ async function HandleFileRequest(request, from) {
 				`./${AvatarDir}/${avatar.address.substring(1, 4)}/${avatar.address.substring(4, 7)}/${avatar.address}.png`,
 			);
 			const buffer = await fsp.readFile(avatar_file_path);
-			const nonce = Uint32ToBuffer(request.Nonce);
-			SendMessage(from, Buffer.concat([nonce, buffer]));
+			const nonce = Uint32ToBuffer(request.Nonce as number);
+			SendMessage(from, Buffer.concat([nonce as Buffer, buffer]));
 			break;
 		}
 		case FileRequestType.File: {
-			const file = await prisma.File.findFirst({
+			const file = await prisma.file.findFirst({
 				where: {
 					AND: {
-						hash: request.Hash,
+						hash: request.Hash as string,
 						is_saved: true,
 					},
 				},
@@ -633,7 +838,7 @@ async function HandleFileRequest(request, from) {
 				},
 			});
 			if (file !== null && file.chunk_cursor === file.chunk_length) {
-				const start = (request.ChunkCursor - 1) * FileChunkSize;
+				const start = ((request.ChunkCursor as number) - 1) * FileChunkSize;
 				if (start >= file.size) {
 					ConsoleWarn(
 						`[HandleFileRequest] Chunk cursor ${request.ChunkCursor} out of range for ${request.Hash}, start=${start}, file.size=${file.size}`,
@@ -643,7 +848,7 @@ async function HandleFileRequest(request, from) {
 				const file_left = file.size - start;
 				const length = Math.min(FileChunkSize, file_left);
 				const file_path = path.resolve(
-					`./${FileDir}/${request.Hash.substring(0, 3)}/${request.Hash.substring(3, 6)}/${request.Hash}`,
+					`./${FileDir}/${(request.Hash as string).substring(0, 3)}/${(request.Hash as string).substring(3, 6)}/${request.Hash}`,
 				);
 				try {
 					// fsp.readFile does NOT support {start, end} options - use fsp.open + fd.read instead
@@ -652,12 +857,12 @@ async function HandleFileRequest(request, from) {
 						const buffer = Buffer.alloc(length);
 						await fd.read(buffer, 0, length, start);
 						const chunk = Uint8Array.from(buffer);
-						const nonce = Uint32ToBuffer(request.Nonce);
-						SendMessage(from, Buffer.concat([nonce, chunk]));
+						const nonce = Uint32ToBuffer(request.Nonce as number);
+						SendMessage(from, Buffer.concat([nonce as Buffer, chunk]));
 					} finally {
 						await fd.close();
 					}
-				} catch (err) {
+				} catch (err: any) {
 					ConsoleError(err);
 				}
 			}
@@ -680,17 +885,17 @@ async function HandleFileRequest(request, from) {
 				break;
 			}
 			cacheGroupFileRequest(from, request);
-			const members = groupMap[request.GroupHash];
+			const members = groupMap[request.GroupHash as string];
 			if (members) {
 				const tmp_members = shuffleArray(members);
 				for (let i = 0; i < tmp_members.length; i++) {
 					const member = tmp_members[i];
 					if (
 						from !== member &&
-						Conns[member] &&
-						Conns[member].readyState === WebSocket.OPEN
+						Conns[member as string] &&
+						Conns[member as string].readyState === WebSocket.OPEN
 					) {
-						SendMessage(member, JSON.stringify(request));
+						SendMessage(member as string, JSON.stringify(request));
 						return;
 					}
 				}
@@ -711,42 +916,42 @@ async function HandleFileRequest(request, from) {
  * @param {object} avatar - Avatar object with PublicKey, Hash, Size, Timestamp fields
  * @returns {Promise<void>}
  */
-async function CacheAvatar(from, avatar) {
+async function CacheAvatar(from: string, avatar: Record<string, unknown>): Promise<void> {
 	const timestamp = Date.now();
-	const avatar_address = rippleKeyPairs.deriveAddress(avatar.PublicKey);
+	const avatar_address = rippleKeyPairs.deriveAddress(avatar.PublicKey as string);
 	if (avatar.Hash !== GenesisHash) {
-		fetchAvatarFile(from, avatar_address, avatar.Hash);
+		fetchAvatarFile(from, avatar_address, avatar.Hash as string);
 	}
 
-	const db_a = await prisma.Avatar.findFirst({
+	const db_a = await prisma.avatar.findFirst({
 		where: {
 			address: avatar_address,
 		},
 	});
 	if (db_a === null) {
-		await prisma.Avatar.create({
+		await prisma.avatar.create({
 			data: {
 				address: avatar_address,
-				hash: avatar.Hash,
-				size: avatar.Size,
-				signed_at: avatar.Timestamp,
+				hash: avatar.Hash as string,
+				size: avatar.Size as number,
+				signed_at: avatar.Timestamp as number,
 				json: JSON.stringify(avatar),
 				is_saved: false,
 			},
 		});
 	} else if (
-		avatar.Timestamp > db_a.signed_at &&
+		avatar.Timestamp as number > db_a.signed_at &&
 		db_a.signed_at < timestamp - AVATAR_UPDATE_THROTTLE_MS &&
-		avatar.Hash !== db_a.hash
+		avatar.Hash as string !== db_a.hash
 	) {
-		await prisma.Avatar.update({
+		await prisma.avatar.update({
 			where: {
 				address: avatar_address,
 			},
 			data: {
-				hash: avatar.Hash,
-				size: avatar.Size,
-				signed_at: avatar.Timestamp,
+				hash: avatar.Hash as string,
+				size: avatar.Size as number,
+				signed_at: avatar.Timestamp as number,
 				json: JSON.stringify(avatar),
 				is_saved: false,
 			},
@@ -764,19 +969,19 @@ async function CacheAvatar(from, avatar) {
  * @param {string} from - Source XRPL address of the requesting client
  * @returns {Promise<void>}
  */
-async function HandleAvatarRequest(request, from) {
-	const new_list = [];
-	const old_list = [];
+async function HandleAvatarRequest(request: Record<string, unknown>, from: string): Promise<void> {
+	const new_list: unknown[] = [];
+	const old_list: { Address: string; SignedAt: number }[] = [];
 
-	const addresses = request.List.map((item) => item.Address);
-	const db_avatars = await prisma.Avatar.findMany({
+	const addresses = (request.List as { Address: string }[]).map((item) => item.Address);
+	const db_avatars = await prisma.avatar.findMany({
 		where: { address: { in: addresses } },
 		select: { address: true, is_saved: true, signed_at: true, json: true },
 	});
 	const avatarMap = new Map(db_avatars.map((a) => [a.address, a]));
 
-	for (let i = 0; i < request.List.length; i++) {
-		const avatar = request.List[i];
+	for (let i = 0; i < (request.List as { Address: string; SignedAt: number }[]).length; i++) {
+		const avatar = (request.List as { Address: string; SignedAt: number }[])[i];
 		const db_avatar = avatarMap.get(avatar.Address);
 
 		if (db_avatar !== undefined) {
@@ -812,18 +1017,18 @@ async function HandleAvatarRequest(request, from) {
 	}
 }
 
-async function BindBulletinTag(bulletin_hash, tags) {
+async function BindBulletinTag(bulletin_hash: string, tags: string[] | null | undefined): Promise<unknown> {
 	if (!tags || tags.length === 0) return null;
 
 	const uniqueTags = [...new Set(tags)];
 
 	return await prisma.$transaction(async (tx) => {
-		await tx.Tag.createMany({
+		await tx.tag.createMany({
 			data: uniqueTags.map((name) => ({ name: name })),
 			skipDuplicates: true,
 		});
 
-		return await tx.Bulletin.update({
+		return await tx.bulletin.update({
 			where: { hash: bulletin_hash },
 			data: {
 				tags: {
@@ -835,7 +1040,7 @@ async function BindBulletinTag(bulletin_hash, tags) {
 	});
 }
 
-async function BindBulletinFile(bulletin_hash, files) {
+async function BindBulletinFile(bulletin_hash: string, files: { Hash: string; Size: number }[]): Promise<unknown> {
 	return await prisma.$transaction(async (tx) => {
 		const fetchedFiles = [];
 
@@ -862,7 +1067,7 @@ async function BindBulletinFile(bulletin_hash, files) {
 				continue;
 			}
 
-			const fileRecord = await tx.File.upsert({
+			const fileRecord = await tx.file.upsert({
 				where: { hash: f.Hash },
 				update: {},
 				create: {
@@ -880,7 +1085,7 @@ async function BindBulletinFile(bulletin_hash, files) {
 
 		// Batch-connect all files to bulletin in a single update instead of per-file updates
 		if (fetchedFiles.length > 0) {
-			await tx.Bulletin.update({
+			await tx.bulletin.update({
 				where: { hash: bulletin_hash },
 				data: {
 					files: {
@@ -904,10 +1109,11 @@ async function BindBulletinFile(bulletin_hash, files) {
  * @param {boolean} isFromNode - True if the bulletin arrived via node-to-node sync (whitelist check applies)
  * @returns {Promise<void>}
  */
-async function CacheBulletin(from, bulletin, isFromNode) {
+async function CacheBulletin(from: string, bulletin: Record<string, unknown>, isFromNode: boolean): Promise<boolean> {
 	const timestamp = Date.now();
 	const hash = QuarterSHA512Message(bulletin);
-	const bulletin_address = rippleKeyPairs.deriveAddress(bulletin.PublicKey);
+	const bulletin_address = rippleKeyPairs.deriveAddress(bulletin.PublicKey as string);
+	let isNewRecord = false;
 
 	if (!isAllowed(bulletin_address)) {
 		if (isFromNode) {
@@ -926,31 +1132,32 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 				),
 			);
 		}
-		return;
+		return false;
 	}
 
 	try {
-		const result = await prisma.Bulletin.upsert({
+		const result = await prisma.bulletin.upsert({
 			where: {
 				hash: hash,
 			},
 			update: {},
 			create: {
 				hash: hash,
-				pre_hash: bulletin.PreHash,
+				pre_hash: bulletin.PreHash as string,
 				address: bulletin_address,
-				sequence: bulletin.Sequence,
-				content: bulletin.Content,
+				sequence: bulletin.Sequence as number,
+				content: bulletin.Content as string,
 				json: JSON.stringify(bulletin),
-				signed_at: bulletin.Timestamp,
+				signed_at: bulletin.Timestamp as number,
 				created_at: timestamp,
 			},
 		});
 
 		// 如果是新创建的，才执行后续绑定操作
-		const isNewRecord = Number(result.created_at) === timestamp;
+		isNewRecord = Number(result.created_at) === timestamp;
 
 		if (isNewRecord) {
+			lastBulletinAt = Date.now();
 			ConsoleInfo(
 				`[CacheBulletin] New bulletin saved: ${hash}, seq=${result.sequence}, address=${bulletin_address}`,
 			);
@@ -958,30 +1165,30 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 
 			if (result.sequence !== 1) {
 				try {
-					await prisma.Bulletin.update({
-						where: { hash: bulletin.PreHash },
+					await prisma.bulletin.update({
+						where: { hash: bulletin.PreHash as string },
 						data: { next_hash: hash },
 					});
-				} catch (e) {
+				} catch (e: any) {
 					ConsoleDebug(
-						`[CacheBulletin] Failed to update next_hash for PreHash ${bulletin.PreHash} -> ${hash}: ${e.message}`,
+						`[CacheBulletin] Failed to update next_hash for PreHash ${bulletin.PreHash} -> ${hash}: ${(e as Error).message}`,
 					);
 				}
 			}
 
 			// create tag
 			if (bulletin.Tag && Array.isArray(bulletin.Tag) && bulletin.Tag.length > 0) {
-				await BindBulletinTag(hash, bulletin.Tag);
+				await BindBulletinTag(hash, bulletin.Tag as string[]);
 			}
 
 			// create quote
-			if (bulletin.Quote && bulletin.Quote.length > 0) {
-				const quoteData = bulletin.Quote.map((q) => ({
+			if (bulletin.Quote && (bulletin.Quote as unknown[]).length > 0) {
+				const quoteData = (bulletin.Quote as { Hash: string }[]).map((q) => ({
 					post_hash: q.Hash,
 					reply_hash: hash,
-					signed_at: bulletin.Timestamp,
+					signed_at: bulletin.Timestamp as number,
 				}));
-				await prisma.Reply.createMany({
+				await prisma.reply.createMany({
 					data: quoteData,
 					skipDuplicates: true,
 				});
@@ -996,7 +1203,7 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 				ConsoleInfo(
 					`[CacheBulletin] Bulletin has ${bulletin.File.length} file(s), calling BindBulletinFile`,
 				);
-				const files_to_fetch = await BindBulletinFile(hash, bulletin.File);
+				const files_to_fetch: { hash: string; is_saved: boolean; chunk_cursor: number }[] = await BindBulletinFile(hash, bulletin.File as { Hash: string; Size: number }[]) as { hash: string; is_saved: boolean; chunk_cursor: number }[];
 				ConsoleInfo(
 					`[CacheBulletin] BindBulletinFile returned ${files_to_fetch.length} file record(s)`,
 				);
@@ -1008,11 +1215,15 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 						ConsoleInfo(
 							`[CacheBulletin] File ${file.hash} already saved, skipping fetch`,
 						);
+					} else if (process.env.RMS_SKIP_FILE_FETCH) {
+						ConsoleWarn(
+							`[CacheBulletin] RMS_SKIP_FILE_FETCH: not fetching ${file.hash}`,
+						);
 					} else {
 						ConsoleInfo(
-							`[CacheBulletin] Calling fetchBulletinFile for ${file.hash} from ${bulletin_address} cursor=${file.chunk_cursor + 1}`,
+							`[CacheBulletin] Queuing fetchBulletinFile for ${file.hash} from ${bulletin_address} cursor=${file.chunk_cursor + 1}`,
 						);
-						fetchBulletinFile(
+						enqueueFileFetch(
 							from,
 							bulletin_address,
 							file.hash,
@@ -1034,35 +1245,37 @@ async function CacheBulletin(from, bulletin, isFromNode) {
 			}
 
 			if (isAllowed(bulletin_address)) {
-				broadcastBulletinToNodes(bulletin);
+				// Pass the originating peer so it doesn't receive its own bulletin back.
+				broadcastBulletinToNodes(bulletin, isFromNode ? from : undefined);
 			}
 		}
 	} catch (error) {
-		if (error.code === "P2002") {
+		if ((error as { code?: string }).code === "P2002") {
 			ConsoleDebug(
 				`[CacheBulletin] Duplicate bulletin ignored (already exists): ${hash}`,
 			);
 		} else {
 			ConsoleError(
-				`[CacheBulletin] Error saving bulletin ${hash}: ${error.message}`,
+				`[CacheBulletin] Error saving bulletin ${hash}: ${(error as Error).message}`,
 			);
 		}
 	}
+	return isNewRecord;
 }
 
-function clearSubscribe(address) {
+function clearSubscribe(address: string): void {
 	Object.entries(subscribeMap).forEach(([key, value]) => {
 		const new_value = value.filter((a) => a !== address);
 		subscribeMap[key] = new_value;
 	});
 }
 
-function HandleBulletinSubscribe(request, from) {
+function HandleBulletinSubscribe(request: Record<string, unknown>, from: string): void {
 	clearSubscribe(from);
-	for (let i = 0; i < request.List.length; i++) {
-		const subscribe_address = request.List[i];
+	for (let i = 0; i < (request.List as string[]).length; i++) {
+		const subscribe_address = (request.List as string[])[i];
 		if (subscribe_address !== from) {
-			let new_value = [];
+			let new_value: string[] = [];
 			if (subscribeMap[subscribe_address] !== undefined) {
 				new_value = subscribeMap[subscribe_address];
 			}
@@ -1073,13 +1286,13 @@ function HandleBulletinSubscribe(request, from) {
 }
 
 // ecdh
-async function CacheECDH(json) {
+async function CacheECDH(json: Record<string, unknown>): Promise<void> {
 	let address1 = "";
 	let address2 = "";
 	let json1 = "";
 	let json2 = "";
-	const sour_address = rippleKeyPairs.deriveAddress(json.PublicKey);
-	const dest_address = json.To;
+	const sour_address = rippleKeyPairs.deriveAddress(json.PublicKey as string);
+	const dest_address = json.To as string;
 	if (sour_address > dest_address) {
 		address1 = sour_address;
 		address2 = dest_address;
@@ -1090,33 +1303,33 @@ async function CacheECDH(json) {
 		json2 = JSON.stringify(json);
 	}
 
-	const dh = await prisma.ECDH.findFirst({
+	const dh = await prisma.eCDH.findFirst({
 		where: {
 			address1: address1,
 			address2: address2,
-			partition: json.Partition,
-			sequence: json.Sequence,
+			partition: json.Partition as number,
+			sequence: json.Sequence as number,
 		},
 	});
 	if (dh === null) {
 		if (json1 != "") {
-			await prisma.ECDH.create({
+			await prisma.eCDH.create({
 				data: {
 					address1: address1,
 					address2: address2,
-					partition: json.Partition,
-					sequence: json.Sequence,
+					partition: json.Partition as number,
+					sequence: json.Sequence as number,
 					json1: json1,
 					json2: "",
 				},
 			});
 		} else if (json2 != "") {
-			await prisma.ECDH.create({
+			await prisma.eCDH.create({
 				data: {
 					address1: address1,
 					address2: address2,
-					partition: json.Partition,
-					sequence: json.Sequence,
+					partition: json.Partition as number,
+					sequence: json.Sequence as number,
 					json1: "",
 					json2: json2,
 				},
@@ -1126,21 +1339,21 @@ async function CacheECDH(json) {
 		if (dh.json1 != "") {
 			let old_json1;
 			try {
-				old_json1 = JSON.parse(dh.json1);
+				old_json1 = JSON.parse(dh.json1 as string);
 			} catch {
 				old_json1 = null;
 			}
-			if (old_json1 && json.Timestamp >= old_json1.Timestamp) {
+			if (old_json1 && json.Timestamp as number >= old_json1.Timestamp) {
 				return;
 			}
 		}
-		await prisma.ECDH.update({
+		await prisma.eCDH.update({
 			where: {
 				address1_address2_partition_sequence: {
 					address1: address1,
 					address2: address2,
-					partition: json.Partition,
-					sequence: json.Sequence,
+					partition: json.Partition as number,
+					sequence: json.Sequence as number,
 				},
 			},
 			data: {
@@ -1151,21 +1364,21 @@ async function CacheECDH(json) {
 		if (dh.json2 != "") {
 			let old_json2;
 			try {
-				old_json2 = JSON.parse(dh.json2);
+				old_json2 = JSON.parse(dh.json2 as string);
 			} catch {
 				old_json2 = null;
 			}
-			if (old_json2 && json.Timestamp >= old_json2.Timestamp) {
+			if (old_json2 && json.Timestamp as number >= old_json2.Timestamp) {
 				return;
 			}
 		}
-		await prisma.ECDH.update({
+		await prisma.eCDH.update({
 			where: {
 				address1_address2_partition_sequence: {
 					address1: address1,
 					address2: address2,
-					partition: json.Partition,
-					sequence: json.Sequence,
+					partition: json.Partition as number,
+					sequence: json.Sequence as number,
 				},
 			},
 			data: {
@@ -1175,11 +1388,11 @@ async function CacheECDH(json) {
 	}
 }
 
-async function HandleECDHSync(json) {
+async function HandleECDHSync(json: Record<string, unknown>): Promise<void> {
 	let address1 = "";
 	let address2 = "";
-	const sour_address = rippleKeyPairs.deriveAddress(json.PublicKey);
-	const dest_address = json.To;
+	const sour_address = rippleKeyPairs.deriveAddress(json.PublicKey as string);
+	const dest_address = json.To as string;
 	if (sour_address === dest_address) {
 		return;
 	}
@@ -1191,12 +1404,12 @@ async function HandleECDHSync(json) {
 		address2 = sour_address;
 	}
 
-	const dh = await prisma.ECDH.findFirst({
+	const dh = await prisma.eCDH.findFirst({
 		where: {
 			address1: address1,
 			address2: address2,
-			partition: json.Partition,
-			sequence: json.Sequence,
+			partition: json.Partition as number,
+			sequence: json.Sequence as number,
 		},
 		select: {
 			json1: true,
@@ -1205,20 +1418,20 @@ async function HandleECDHSync(json) {
 	});
 	if (dh != null && json.Pair === "") {
 		if (address1 === sour_address && dh.json2 != "") {
-			SendMessage(sour_address, dh.json2);
+			SendMessage(sour_address, dh.json2 as string);
 		} else if (address2 === sour_address && dh.json1 != "") {
-			SendMessage(sour_address, dh.json1);
+			SendMessage(sour_address, dh.json1 as string);
 		}
 	}
 }
 
 // private
-async function CachePrivateMessage(json) {
+async function CachePrivateMessage(json: Record<string, unknown>): Promise<void> {
 	const str_json = JSON.stringify(json);
 	const hash = QuarterSHA512Message(json);
-	const sour_address = rippleKeyPairs.deriveAddress(json.PublicKey);
-	const dest_address = json.To;
-	const last_msg = await prisma.PrivateMessage.findFirst({
+	const sour_address = rippleKeyPairs.deriveAddress(json.PublicKey as string);
+	const dest_address = json.To as string;
+	const last_msg = await prisma.privateMessage.findFirst({
 		where: {
 			sour_address: sour_address,
 			dest_address: dest_address,
@@ -1232,18 +1445,18 @@ async function CachePrivateMessage(json) {
 		},
 	});
 	if (
-		(last_msg === null && json.Sequence === 1 && json.PreHash === GenesisHash) ||
+		(last_msg === null && json.Sequence as number === 1 && json.PreHash === GenesisHash) ||
 		(last_msg !== null &&
-			json.Sequence === last_msg.sequence + 1 &&
+			json.Sequence as number === last_msg.sequence + 1 &&
 			json.PreHash === last_msg.hash)
 	) {
-		await prisma.PrivateMessage.create({
+		await prisma.privateMessage.create({
 			data: {
 				hash: hash,
 				sour_address: sour_address,
 				dest_address: dest_address,
-				sequence: json.Sequence,
-				signed_at: json.Timestamp,
+				sequence: json.Sequence as number,
+				signed_at: json.Timestamp as number,
 				json: str_json,
 			},
 		});
@@ -1256,7 +1469,7 @@ async function CachePrivateMessage(json) {
 			SelfPrivateKey,
 		);
 		SendMessage(sour_address, msg);
-	} else if (last_msg !== null && last_msg.sequence < json.Sequence) {
+	} else if (last_msg !== null && last_msg.sequence < (json.Sequence as number)) {
 		const msg = GenPrivateMessageSync(
 			dest_address,
 			last_msg.sequence,
@@ -1275,23 +1488,23 @@ async function CachePrivateMessage(json) {
  * @param {object} json - PrivateMessageSync message with PublicKey, To, SelfSequence, PairSequence
  * @returns {Promise<void>}
  */
-async function HandlePrivateMessageSync(json) {
-	const from_address = rippleKeyPairs.deriveAddress(json.PublicKey);
-	const msg_list = await prisma.PrivateMessage.findMany({
+async function HandlePrivateMessageSync(json: Record<string, unknown>): Promise<void> {
+	const from_address = rippleKeyPairs.deriveAddress(json.PublicKey as string);
+	const msg_list = await prisma.privateMessage.findMany({
 		where: {
 			OR: [
 				{
 					sour_address: from_address,
-					dest_address: json.To,
-					sequence: {
-						gt: json.SelfSequence,
-					},
+				dest_address: json.To as string,
+				sequence: {
+					gt: json.SelfSequence as number,
+				},
 				},
 				{
-					sour_address: json.To,
+					sour_address: json.To as string,
 					dest_address: from_address,
 					sequence: {
-						gt: json.PairSequence,
+						gt: json.PairSequence as number,
 					},
 				},
 			],
@@ -1316,15 +1529,15 @@ async function HandlePrivateMessageSync(json) {
  * @param {string} from - The XRPL address requesting group membership data
  * @returns {Promise<void>}
  */
-async function HandleGroupSync(from) {
-	const group_hash_list = [];
+async function HandleGroupSync(from: string): Promise<void> {
+	const group_hash_list: string[] = [];
 	Object.entries(groupMap).forEach(([hash, member]) => {
 		if (member.includes(from)) {
 			group_hash_list.push(hash);
 		}
 	});
 	if (group_hash_list.length > 0) {
-		const group_list = await prisma.Group.findMany({
+		const group_list = await prisma.group.findMany({
 			where: {
 				hash: {
 					in: group_hash_list,
@@ -1366,69 +1579,78 @@ async function HandleGroupSync(from) {
 	}
 }
 
-async function CacheGroup(group) {
-	const address = rippleKeyPairs.deriveAddress(group.PublicKey);
+async function CacheGroup(group: Record<string, unknown>): Promise<void> {
+	const address = rippleKeyPairs.deriveAddress(group.PublicKey as string);
 
-	const db_g = await prisma.Group.findFirst({
+	const db_g = await prisma.group.findFirst({
 		where: {
-			hash: group.Hash,
+			hash: group.Hash as string,
 		},
 	});
 
 	if (group.ObjectType === ObjectType.GroupDelete) {
 		if (db_g !== null && db_g.deleted_at === null) {
-			const result = await prisma.Group.update({
+			const result = await prisma.group.update({
 				where: {
-					hash: group.Hash,
+					hash: group.Hash as string,
 				},
 				data: {
-					deleted_at: group.Timestamp,
+					deleted_at: group.Timestamp as number,
 					delete_json: JSON.stringify(group),
 				},
 			});
 			if (result) {
-				delete groupMap[group.Hash];
+				delete groupMap[group.Hash as string];
 			}
 		}
 	} else if (group.ObjectType === ObjectType.GroupCreate) {
-		await prisma.Group.upsert({
-			where: { hash: group.Hash },
+		await prisma.group.upsert({
+			where: { hash: group.Hash as string },
 			create: {
-				hash: group.Hash,
+				hash: group.Hash as string,
 				created_by: address,
 				member: JSON.stringify(group.Member),
-				created_at: group.Timestamp,
+				created_at: group.Timestamp as number,
 				create_json: JSON.stringify(group),
 			},
 			update: {}, // GroupCreate only creates; no update needed for existing records
 		});
 
-		const members = group.Member;
+		const members = group.Member as string[];
 		members.push(address);
-		groupMap[group.Hash] = members;
+		groupMap[group.Hash as string] = members;
 	}
 }
 
 // send
 /** Generic sender: looks up a key in a connection map, checks readyState, and sends. */
-function sendTo(key, message, connMap) {
+function sendTo(key: string, message: string | Buffer, connMap: Record<string, WebSocket>): void {
 	try {
 		if (connMap[key] && connMap[key].readyState === WebSocket.OPEN) {
 			connMap[key].send(message);
-			ConsoleInfo(`[sendTo] Message SENT to ${key}, bytes=${message.length}`);
+			// Success is the common case and dominated the log (~11k lines per
+			// 10 min). Keep it at debug level; failures stay visible.
+			ConsoleDebug(`[sendTo] Message SENT to ${key}, bytes=${(message as string).length}`);
 		} else {
 			ConsoleWarn(
 				`[sendTo] FAILED to send to ${key}, readyState=${connMap[key]?.readyState}`,
 			);
 		}
-	} catch (err) {
-		ConsoleWarn(`[sendTo] EXCEPTION sending to ${key}: ${err.message}`);
+	} catch (err: any) {
+		ConsoleWarn(`[sendTo] EXCEPTION sending to ${key}: ${(err as Error).message}`);
 	}
 }
 
-/** Send to a client by address (uses Conns map). */
-function SendMessage(address, message) {
+/** Send to a client by address (uses Conns map).
+ * Falls back to NodeConns so replies addressed to a peer node URL are routed
+ * over the node connection instead of being silently dropped. Client
+ * addresses (rXXX) and node URLs (wss://...) never collide, so the fallback
+ * cannot misdirect a client message. */
+function SendMessage(address: string, message: string | Buffer): void {
 	sendTo(address, message, Conns);
+	if (NodeConns[address] !== undefined) {
+		sendTo(address, message, NodeConns);
+	}
 }
 
 // handle Object
@@ -1444,7 +1666,7 @@ function SendMessage(address, message) {
  * @param {string} address - Chain owner
  * @returns {Promise<{max_sequence: number, contiguous_prefix: number}>}
  */
-async function fetchChainState(address) {
+async function fetchChainState(address: string): Promise<{ max_sequence: number; contiguous_prefix: number }> {
 	const rows = await prisma.$queryRaw`
 		WITH seqs AS (
 			SELECT DISTINCT sequence AS s FROM "Bulletin" WHERE address = ${address}
@@ -1458,10 +1680,10 @@ async function fetchChainState(address) {
 				(SELECT COUNT(*) FROM seqs)
 			)::int AS contiguous_prefix
 	`;
-	const row = rows && rows[0] ? rows[0] : {};
+	const row = (rows as { max_sequence: number; contiguous_prefix: number }[]) && (rows as { max_sequence: number; contiguous_prefix: number }[])[0] ? (rows as { max_sequence: number; contiguous_prefix: number }[])[0] : {};
 	return {
-		max_sequence: Number(row.max_sequence) || 0,
-		contiguous_prefix: Number(row.contiguous_prefix) || 0,
+		max_sequence: Number((row as { max_sequence: number }).max_sequence) || 0,
+		contiguous_prefix: Number((row as { contiguous_prefix: number }).contiguous_prefix) || 0,
 	};
 }
 
@@ -1475,7 +1697,7 @@ async function fetchChainState(address) {
  * @param {string} address - Chain owner
  * @returns {Promise<number|null>} First missing sequence, or null
  */
-async function FindFirstMissingSequence(address) {
+async function FindFirstMissingSequence(address: string): Promise<number | null> {
 	const { max_sequence, contiguous_prefix } = await fetchChainState(address);
 	if (max_sequence === 0) return null;
 	if (contiguous_prefix >= max_sequence) {
@@ -1493,8 +1715,8 @@ async function FindFirstMissingSequence(address) {
 /**
  * Get max_sequence + 1 for an address, or null if no bulletins exist.
  */
-async function GetMaxSequencePlusOne(address) {
-	const result = await prisma.Bulletin.findFirst({
+async function GetMaxSequencePlusOne(address: string): Promise<number | null> {
+	const result = await prisma.bulletin.findFirst({
 		where: { address },
 		orderBy: { sequence: "desc" },
 		select: { sequence: true },
@@ -1521,11 +1743,11 @@ async function GetMaxSequencePlusOne(address) {
  * @param {boolean} isFromNode - True if the message arrived via node-to-node sync
  * @returns {Promise<void>}
  */
-async function handleObject(from, message, json, isFromNode) {
+async function handleObject(from: string, message: string, json: Record<string, unknown>, isFromNode: boolean): Promise<void> {
 	switch (json.ObjectType) {
 		case ObjectType.Bulletin: {
 			ConsoleInfo(
-				`[handleObject.Bulletin] Verifying signature for PublicKey=${json.PublicKey?.substring(0, 20)}...`,
+				`[handleObject.Bulletin] Verifying signature for PublicKey=${(json.PublicKey as string)?.substring(0, 20)}...`,
 			);
 			const sigValid = VerifyJsonSignature(json);
 			ConsoleInfo(`[handleObject.Bulletin] Signature valid: ${sigValid}`);
@@ -1533,32 +1755,42 @@ async function handleObject(from, message, json, isFromNode) {
 				ConsoleInfo(
 					`[handleObject.Bulletin] Caching bulletin hash=${json.Hash}, seq=${json.Sequence} from ${from}`,
 				);
-				await CacheBulletin(from, json, isFromNode);
+				const isNew = await CacheBulletin(from, json, isFromNode);
 				//fetch more bulletin — check for gaps first, then chase next sequence
-				const address = rippleKeyPairs.deriveAddress(json.PublicKey);
+				const address = rippleKeyPairs.deriveAddress(json.PublicKey as string);
 				ConsoleInfo(
 					`[handleObject.Bulletin] Received seq=${json.Sequence} from ${address}, checking sync`,
 				);
 				const gap_sequence = await FindFirstMissingSequence(address);
 				if (gap_sequence === null) {
-					// No gap — chase the next sequence after current max
-					const next_seq = await GetMaxSequencePlusOne(address);
-					if (next_seq === null) {
+					// No gap — chase the next sequence after current max.
+					// ONLY if this bulletin is NEW (advanced our max). If the node
+					// returned an old bulletin (we already had it), it has nothing
+					// newer, and chasing the next sequence would loop forever
+					// (node keeps returning its latest, server keeps requesting next).
+					if (!isNew) {
 						ConsoleDebug(
-							`[handleObject.Bulletin] ${address}: no bulletins to request`,
+							`[handleObject.Bulletin] ${address}: received old bulletin seq=${json.Sequence} (already cached), not chasing next`,
 						);
 					} else {
-						ConsoleInfo(
-							`[handleObject.Bulletin] Sending BulletinRequest seq=${next_seq} to ${address} (chasing next, max cached=${next_seq - 1})`,
-						);
-						const msg = GenBulletinRequest(
-							address,
-							next_seq,
-							address,
-							SelfPublicKey,
-							SelfPrivateKey,
-						);
-						SendMessage(from, msg);
+						const next_seq = await GetMaxSequencePlusOne(address);
+						if (next_seq === null) {
+							ConsoleDebug(
+								`[handleObject.Bulletin] ${address}: no bulletins to request`,
+							);
+						} else {
+							ConsoleInfo(
+								`[handleObject.Bulletin] Sending BulletinRequest seq=${next_seq} to ${address} (chasing next, max cached=${next_seq - 1})`,
+							);
+							const msg = GenBulletinRequest(
+								address,
+								next_seq,
+								address,
+								SelfPublicKey,
+								SelfPrivateKey,
+							);
+							SendMessage(from, msg);
+						}
 					}
 				} else {
 					// Gap exists — fetch from the missing point.
@@ -1588,14 +1820,14 @@ async function handleObject(from, message, json, isFromNode) {
 		case ObjectType.ServerAddressList: {
 			// === Node Interaction ===
 			// pull step 2: fetch account latest bulletin
-			let items = json.List;
+			let items = json.List as { Address: string; Count: number }[];
 			if (WhiteList.length > 0) {
 				items = items.filter((item) => isAllowed(item.Address));
 			}
 
 			for (let i = 0; i < items.length; i++) {
 				const item = items[i];
-				let bulletin = await prisma.Bulletin.findFirst({
+				let bulletin = await prisma.bulletin.findFirst({
 					where: {
 						address: item.Address,
 					},
@@ -1619,7 +1851,7 @@ async function handleObject(from, message, json, isFromNode) {
 						);
 						SendMessage(from, bulletin_req);
 					} else if (bulletin.sequence > item.Count) {
-						bulletin = await prisma.Bulletin.findFirst({
+						const bulletin_json = await prisma.bulletin.findFirst({
 							where: {
 								AND: {
 									address: item.Address,
@@ -1630,8 +1862,8 @@ async function handleObject(from, message, json, isFromNode) {
 								json: true,
 							},
 						});
-						if (bulletin) {
-							SendMessage(from, bulletin.json);
+						if (bulletin_json) {
+							SendMessage(from, bulletin_json.json);
 						}
 					}
 				} else {
@@ -1645,9 +1877,9 @@ async function handleObject(from, message, json, isFromNode) {
 					SendMessage(from, bulletin_req);
 				}
 			}
-			if (json.Page !== json.TotalPage) {
+			if ((json.Page as number) !== (json.TotalPage as number)) {
 				const msg = GenServerAddressListRequest(
-					json.Page + 1,
+					json.Page as number + 1,
 					SelfPublicKey,
 					SelfPrivateKey,
 				);
@@ -1656,8 +1888,8 @@ async function handleObject(from, message, json, isFromNode) {
 			break;
 		}
 		case ObjectType.PrivateMessage:
-			if (!isAllowed(from) || !isAllowed(json.To)) {
-				ConsoleWarn(`[Chat Filter] Blocked PrivateMessage: ${from} → ${json.To}`);
+			if (!isAllowed(from) || !isAllowed(json.To as string)) {
+				ConsoleWarn(`[Chat Filter] Blocked PrivateMessage: ${from} → ${json.To as string}`);
 				SendMessage(
 					from,
 					GenServerNotifyError(
@@ -1670,12 +1902,12 @@ async function handleObject(from, message, json, isFromNode) {
 			if (VerifyJsonSignature(json)) {
 				await CachePrivateMessage(json);
 				SendMessage(from, GenServerNotifyCache(MessageCode.PrivateMsgCached));
-				SendMessage(json.To, message);
+				SendMessage(json.To as string, message);
 			}
 			break;
 		case ObjectType.ECDH:
-			if (!isAllowed(from) || !isAllowed(json.To)) {
-				ConsoleWarn(`[Chat Filter] Blocked ECDH: ${from} → ${json.To}`);
+			if (!isAllowed(from) || !isAllowed(json.To as string)) {
+				ConsoleWarn(`[Chat Filter] Blocked ECDH: ${from} → ${json.To as string}`);
 				SendMessage(
 					from,
 					GenServerNotifyError(
@@ -1689,14 +1921,14 @@ async function handleObject(from, message, json, isFromNode) {
 				await CacheECDH(json);
 				SendMessage(from, GenServerNotifyCache(MessageCode.HandshakeCached));
 				await HandleECDHSync(json);
-				SendMessage(json.To, message);
+				SendMessage(json.To as string, message);
 			}
 			break;
 		case ObjectType.AvatarList:
-			for (let i = 0; i < json.List.length; i++) {
-				const avatar = json.List[i];
-				if (VerifyJsonSignature(avatar)) {
-					await CacheAvatar(from, avatar);
+			for (let i = 0; i < (json.List as unknown[]).length; i++) {
+				const avatar = (json.List as unknown[])[i];
+				if (VerifyJsonSignature(avatar as Record<string, unknown>)) {
+					await CacheAvatar(from, avatar as Record<string, unknown>);
 				}
 			}
 			break;
@@ -1713,16 +1945,16 @@ async function handleObject(from, message, json, isFromNode) {
 				);
 				break;
 			}
-			for (let i = 0; i < json.List.length; i++) {
-				const group = json.List[i];
-				if (VerifyJsonSignature(group)) {
-					await CacheGroup(group);
+			for (let i = 0; i < (json.List as unknown[]).length; i++) {
+				const group = (json.List as unknown[])[i];
+				if (VerifyJsonSignature(group as Record<string, unknown>)) {
+					await CacheGroup(group as Record<string, unknown>);
 				}
 			}
 			break;
 		case ObjectType.GroupMessageList: {
-			if (!isAllowed(from) || !isAllowed(json.To)) {
-				ConsoleWarn(`[Chat Filter] Blocked GroupMessageList: ${from} → ${json.To}`);
+			if (!isAllowed(from) || !isAllowed(json.To as string)) {
+				ConsoleWarn(`[Chat Filter] Blocked GroupMessageList: ${from} → ${json.To as string}`);
 				SendMessage(
 					from,
 					GenServerNotifyError(
@@ -1732,15 +1964,15 @@ async function handleObject(from, message, json, isFromNode) {
 				);
 				break;
 			}
-			const members = groupMap[json.GroupHash];
+			const members = groupMap[json.GroupHash as string];
 			if (members) {
-				if (members.includes(from) && members.includes(json.To)) {
-					SendMessage(json.To, message);
+				if (members.includes(from) && members.includes(json.To as string)) {
+					SendMessage(json.To as string, message);
 				}
 			} else {
 				// Group not in memory map — check if it was deleted, notify the sender
-				const db_g = await prisma.Group.findFirst({
-					where: { hash: json.GroupHash },
+				const db_g = await prisma.group.findFirst({
+					where: { hash: json.GroupHash as string },
 					select: { deleted_at: true, delete_json: true },
 				});
 				if (db_g && db_g.deleted_at !== null && db_g.delete_json) {
@@ -1750,7 +1982,7 @@ async function handleObject(from, message, json, isFromNode) {
 							List: [JSON.parse(db_g.delete_json)],
 						};
 						SendMessage(from, JSON.stringify(group_response));
-					} catch (e) {
+					} catch (e: any) {
 						ConsoleError(
 							`[handleObject.GroupMessageList] failed to notify deleted group ${json.GroupHash}: ${e.message}`,
 						);
@@ -1779,10 +2011,10 @@ async function handleObject(from, message, json, isFromNode) {
  * @param {string} from - Requesting XRPL address
  * @returns {Promise<void>}
  */
-async function HandleAddressLeaderboard(json, from) {
+async function HandleAddressLeaderboard(json: Record<string, unknown>, from: string): Promise<void> {
 	const where = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
 
-	const result = await prisma.Bulletin.groupBy({
+	const result = await prisma.bulletin.groupBy({
 		where,
 		by: "address",
 		_count: {
@@ -1793,10 +2025,10 @@ async function HandleAddressLeaderboard(json, from) {
 				address: "desc",
 			},
 		},
-		skip: (json.Page - 1) * PageSize,
+		skip: ((json.Page as number) - 1) * PageSize,
 		take: PageSize,
 	});
-	const address_list = [];
+	const address_list: { Address: string; Count: number }[] = [];
 	result.forEach((item) => {
 		address_list.push({
 			Address: item.address,
@@ -1807,7 +2039,7 @@ async function HandleAddressLeaderboard(json, from) {
 	// Total distinct addresses for pagination. Computed per request, which is
 	// wasteful on a busy server; a periodically refreshed counter would be the
 	// next improvement here.
-	const total = await prisma.Bulletin.findMany({
+	const total = await prisma.bulletin.findMany({
 		where,
 		select: { address: true },
 		distinct: ["address"],
@@ -1815,7 +2047,7 @@ async function HandleAddressLeaderboard(json, from) {
 
 	const total_page = calcTotalPage(total.length, PageSize);
 	if (address_list.length > 0) {
-		const msg = GenServerAddressList(json.Page, total_page, address_list);
+		const msg = GenServerAddressList(json.Page as number, total_page, address_list as any[]);
 		SendMessage(from, msg);
 	}
 }
@@ -1838,9 +2070,9 @@ async function HandleAddressLeaderboard(json, from) {
  * @param {number} limit - Number of bulletins to return
  * @returns {Promise<Array>} Raw Bulletin rows
  */
-async function fetchRandomBulletins(limit) {
+async function fetchRandomBulletins(limit: number): Promise<unknown[]> {
 	const rows = await prisma.$queryRaw`SELECT COUNT(*)::int AS c FROM "Bulletin"`;
-	const total = rows && rows[0] ? Number(rows[0].c) || 0 : 0;
+	const total = (rows as any[])[0] ? Number((rows as any[])[0].c) || 0 : 0;
 	if (total === 0) return [];
 	const take = Math.min(limit, total);
 	const offset = Math.floor(Math.random() * Math.max(1, total - take + 1));
@@ -1856,7 +2088,7 @@ async function fetchRandomBulletins(limit) {
  * @param {number} limit - Maximum number of bulletins to return
  * @returns {Promise<Array>} Raw Bulletin rows with media files
  */
-async function fetchMediaBulletins(limit) {
+async function fetchMediaBulletins(limit: number): Promise<unknown[]> {
 	const take = Math.min(limit || 20, 100);
 	return await prisma.$queryRaw`
 		SELECT b.* FROM "Bulletin" b
@@ -1880,14 +2112,14 @@ async function fetchMediaBulletins(limit) {
  * @param {object} json - Parsed and validated message object
  * @returns {Promise<void>}
  */
-async function handleAction(from, message, json) {
+async function handleAction(from: string, message: string, json: Record<string, unknown>): Promise<void> {
 	if (!VerifyJsonSignature(json)) {
 		return;
 	}
 
 	// forward message only after signature verification succeeds
 	if (json.To != undefined) {
-		if (!isAllowed(from) || !isAllowed(json.To)) {
+		if (!isAllowed(from) || !isAllowed(json.To as string)) {
 			ConsoleWarn(
 				`[Chat Filter] Blocked forward: ${from} → ${json.To} (action=${json.Action})`,
 			);
@@ -1900,14 +2132,29 @@ async function handleAction(from, message, json) {
 			);
 			return;
 		}
-		SendMessage(json.To, message);
+		// Only forward to a live peer. Forwarding to an address with no open
+		// connection is a guaranteed no-op (sendTo logs FAILED), and under the
+		// node-sync workload it accounted for hundreds of noisy failures per
+		// cycle because nodes stamp `To` with the bulletin owner, who is often
+		// offline. Dropping here keeps deliverable traffic identical.
+		const to = json.To as string;
+		if (
+			Conns[to]?.readyState === WebSocket.OPEN ||
+			NodeConns[to]?.readyState === WebSocket.OPEN
+		) {
+			SendMessage(to, message);
+		} else {
+			ConsoleDebug(
+				`[forward] ${to} not connected, dropped action=${json.Action}`,
+			);
+		}
 	}
 
 	if (json.Action === ActionCode.BulletinRequest) {
 		//send cache bulletin
 		const addrFilter = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
 		if (json.Hash) {
-			const bulletin = await prisma.Bulletin.findFirst({
+			const bulletin = await prisma.bulletin.findFirst({
 				where: {
 					hash: json.Hash,
 					...addrFilter,
@@ -1920,7 +2167,7 @@ async function handleAction(from, message, json) {
 				SendMessage(from, bulletin.json);
 			}
 		} else if (json.Address && json.Sequence) {
-			const bulletin = await prisma.Bulletin.findFirst({
+			const bulletin = await prisma.bulletin.findFirst({
 				where: {
 					address: json.Address,
 					sequence: json.Sequence,
@@ -1939,39 +2186,39 @@ async function handleAction(from, message, json) {
 	} else if (
 		(json.Action === ActionCode.ServerAddressRequest ||
 			json.Action === ActionCode.BulletinAddressListRequest) &&
-		json.Page > 0
+		(json.Page as number) > 0
 	) {
 		await HandleAddressLeaderboard(json, from);
-	} else if (json.Action === ActionCode.ReplyBulletinRequest && json.Page > 0) {
+	} else if (json.Action === ActionCode.ReplyBulletinRequest && (json.Page as number) > 0) {
 		const addrFilter = WhiteList.length > 0 ? { address: { in: WhiteList } } : {};
 		// Check if parent bulletin is from a whitelisted address
-		const parentBulletin = await prisma.Bulletin.findFirst({
-			where: { hash: json.Hash, ...addrFilter },
+		const parentBulletin = await prisma.bulletin.findFirst({
+			where: { hash: json.Hash as string, ...addrFilter },
 			select: { hash: true },
 		});
 		if (parentBulletin === null) {
 			return;
 		}
-		const reply_hash_list = await prisma.Reply.findMany({
+		const reply_hash_list = await prisma.reply.findMany({
 			where: {
-				post_hash: json.Hash,
+				post_hash: json.Hash as string,
 			},
 			select: {
 				reply_hash: true,
 			},
-			skip: (json.Page - 1) * PageSize,
+			skip: (json.Page as number - 1) * PageSize,
 			take: PageSize,
 			orderBy: { signed_at: "asc" },
 		});
-		let tmp_list = [];
+		let tmp_list: unknown[] = [];
 		reply_hash_list.forEach((reply) => {
 			tmp_list.push(reply.reply_hash);
 		});
 
-		const reply_json_list = await prisma.Bulletin.findMany({
+		const reply_json_list = await prisma.bulletin.findMany({
 			where: {
 				hash: {
-					in: tmp_list,
+					in: tmp_list as string[],
 				},
 				...addrFilter,
 			},
@@ -1991,9 +2238,9 @@ async function handleAction(from, message, json) {
 			if (parsedReply) tmp_list.push(parsedReply);
 		});
 
-		const total = await prisma.Reply.count({
+		const total = await prisma.reply.count({
 			where: {
-				post_hash: json.Hash,
+				post_hash: json.Hash as string,
 			},
 		});
 		let total_page = 0;
@@ -2002,12 +2249,12 @@ async function handleAction(from, message, json) {
 		}
 
 		if (tmp_list.length > 0) {
-			const msg = GenReplyBulletinList(json.Hash, json.Page, total_page, tmp_list);
+			const msg = GenReplyBulletinList(json.Hash as string, json.Page as number, total_page, tmp_list as any[]);
 			SendMessage(from, msg);
 		} else {
-			const post_bulletin = await prisma.Bulletin.findFirst({
+			const post_bulletin = await prisma.bulletin.findFirst({
 				where: {
-					hash: json.Hash,
+					hash: json.Hash as string,
 				},
 				select: {
 					hash: true,
@@ -2015,7 +2262,7 @@ async function handleAction(from, message, json) {
 			});
 			if (post_bulletin === null) {
 				const msg = GenBulletinRequestByHash(
-					json.Hash,
+					json.Hash as string,
 					from,
 					SelfPublicKey,
 					SelfPrivateKey,
@@ -2023,12 +2270,12 @@ async function handleAction(from, message, json) {
 				SendMessage(from, msg);
 			}
 		}
-	} else if (json.Action === ActionCode.TagBulletinRequest && json.Page > 0) {
+	} else if (json.Action === ActionCode.TagBulletinRequest && (json.Page as number) > 0) {
 		const whereCondition = {
-			AND: json.Tag.map((name) => ({ tags: { some: { name: name } } })),
+			AND: (json.Tag as string[]).map((name) => ({ tags: { some: { name: name } } })),
 		};
 		const [list, total] = await prisma.$transaction([
-			prisma.Bulletin.findMany({
+			prisma.bulletin.findMany({
 				where: whereCondition,
 				// include: { tags: true },
 				select: {
@@ -2036,14 +2283,14 @@ async function handleAction(from, message, json) {
 					tags: { select: { name: true } },
 				},
 				orderBy: { signed_at: "desc" },
-				skip: (json.Page - 1) * PageSize,
+				skip: (json.Page as number - 1) * PageSize,
 				take: PageSize,
 			}),
-			prisma.Bulletin.count({
+			prisma.bulletin.count({
 				where: whereCondition,
 			}),
 		]);
-		const tmp_list = [];
+		const tmp_list: unknown[] = [];
 		list.forEach((bulletin) => {
 			let parsedBulletin;
 			try {
@@ -2058,16 +2305,16 @@ async function handleAction(from, message, json) {
 			total_page = calcTotalPage(total, PageSize);
 		}
 		if (tmp_list.length > 0) {
-			const msg = GenTagBulletinList(json.Tag, json.Page, total_page, tmp_list);
+			const msg = GenTagBulletinList(json.Tag as string, json.Page as number, total_page, tmp_list as any[]);
 			SendMessage(from, msg);
 		}
 	} else if (json.Action === ActionCode.RandomBulletinRequest) {
 		const list = await fetchRandomBulletins(20);
-		const tmp_list = [];
+		const tmp_list: unknown[] = [];
 		list.forEach((bulletin) => {
 			let parsedBulletin;
 			try {
-				parsedBulletin = JSON.parse(bulletin.json);
+				parsedBulletin = JSON.parse((bulletin as any).json);
 			} catch {
 				parsedBulletin = null;
 			}
@@ -2075,23 +2322,23 @@ async function handleAction(from, message, json) {
 		});
 
 		if (tmp_list.length > 0) {
-			const msg = GenRandomBulletinList(tmp_list);
+			const msg = GenRandomBulletinList(tmp_list as any[]);
 			SendMessage(from, msg);
 		}
-	} else if (json.Action === ActionCode.MediaBulletinRequest) {
-		const list = await fetchMediaBulletins(json.Limit || 20);
-		const tmp_list = [];
+	} else if (json.Action === (ActionCode as any).MediaBulletinRequest) {
+		const list = await fetchMediaBulletins(json.Limit as number || 20);
+		const tmp_list: unknown[] = [];
 		for (const bulletin of list) {
 			let parsedBulletin;
 			try {
-				parsedBulletin = JSON.parse(bulletin.json);
+				parsedBulletin = JSON.parse((bulletin as any).json);
 			} catch {
 				parsedBulletin = null;
 			}
 			if (parsedBulletin) tmp_list.push(parsedBulletin);
 		}
 		if (tmp_list.length > 0) {
-			const msg = GenRandomBulletinList(tmp_list);
+			const msg = GenRandomBulletinList(tmp_list as any[]);
 			SendMessage(from, msg);
 		}
 	} else if (json.Action === ActionCode.FileRequest) {
@@ -2105,18 +2352,18 @@ async function handleAction(from, message, json) {
 		// state is not advancing (a loop) — log a warning and skip the response so
 		// the server is not flooded. A legitimate re-sync changes the sequences and
 		// resets the counter.
-		const throttleKey = `${from}:${json.To}`;
+		const throttleKey = `${from}:${json.To as string}`;
 		const now = Date.now();
 		let entry = privateSyncThrottle.get(throttleKey);
 		if (
 			!entry ||
 			now - entry.windowStart > PRIVATE_SYNC_WINDOW_MS ||
-			entry.selfSeq !== json.SelfSequence ||
-			entry.pairSeq !== json.PairSequence
+			entry.selfSeq !== json.SelfSequence as number ||
+			entry.pairSeq !== json.PairSequence as number
 		) {
 			entry = {
-				selfSeq: json.SelfSequence,
-				pairSeq: json.PairSequence,
+				selfSeq: json.SelfSequence as number,
+				pairSeq: json.PairSequence as number,
 				count: 0,
 				windowStart: now,
 			};
@@ -2125,7 +2372,7 @@ async function handleAction(from, message, json) {
 		entry.count++;
 		if (entry.count > PRIVATE_SYNC_MAX) {
 			ConsoleWarn(
-				`[PrivateMessageSync] THROTTLED: ${entry.count} identical requests from ${from} to ${json.To} (SelfSeq=${json.SelfSequence}, PairSeq=${json.PairSequence}) in ${PRIVATE_SYNC_WINDOW_MS}ms — likely a client sync loop, skipping response`,
+				`[PrivateMessageSync] THROTTLED: ${entry.count} identical requests from ${from} to ${json.To as string} (SelfSeq=${json.SelfSequence as number}, PairSeq=${json.PairSequence as number}) in ${PRIVATE_SYNC_WINDOW_MS}ms — likely a client sync loop, skipping response`,
 			);
 			return;
 		}
@@ -2155,17 +2402,17 @@ async function handleAction(from, message, json) {
 			);
 			return;
 		}
-		const members = groupMap[json.Hash];
+		const members = groupMap[json.Hash as string];
 		if (members) {
 			const tmp_members = shuffleArray(members);
 			for (let i = 0; i < tmp_members.length; i++) {
 				const member = tmp_members[i];
 				if (
 					from !== member &&
-					Conns[member] &&
-					Conns[member].readyState === WebSocket.OPEN
+					Conns[member as string] &&
+					Conns[member as string].readyState === WebSocket.OPEN
 				) {
-					SendMessage(member, message);
+					SendMessage(member as string, message);
 					return;
 				}
 			}
@@ -2180,7 +2427,7 @@ async function handleAction(from, message, json) {
  * @param {string} address - The XRPL address of the client to synchronize
  * @returns {Promise<void>}
  */
-async function SyncClientRequest(address) {
+async function SyncClientRequest(address: string): Promise<void> {
 	ConsoleInfo(`========================================`);
 	ConsoleInfo(`[SyncClientRequest] Starting sync for ${address}`);
 	ConsoleInfo(
@@ -2232,7 +2479,7 @@ async function SyncClientRequest(address) {
 			let selfSigOk = false;
 			try {
 				selfSigOk = VerifyJsonSignature(JSON.parse(msg));
-			} catch (e) {
+			} catch (e: any) {
 				ConsoleWarn(`[SyncClientRequest] Self-signature test ERROR: ${e.message}`);
 			}
 			ConsoleInfo(
@@ -2257,7 +2504,7 @@ async function SyncClientRequest(address) {
 			let selfSigOk = false;
 			try {
 				selfSigOk = VerifyJsonSignature(JSON.parse(msg));
-			} catch (e) {
+			} catch (e: any) {
 				ConsoleWarn(`[SyncClientRequest] Self-signature test ERROR: ${e.message}`);
 			}
 			ConsoleInfo(
@@ -2288,7 +2535,7 @@ async function SyncClientRequest(address) {
 		let selfSigOk = false;
 		try {
 			selfSigOk = VerifyJsonSignature(JSON.parse(msg));
-		} catch (e) {
+		} catch (e: any) {
 			ConsoleWarn(`[SyncClientRequest] Self-signature test ERROR: ${e.message}`);
 		}
 		ConsoleInfo(
@@ -2307,7 +2554,7 @@ async function SyncClientRequest(address) {
 		);
 		const start = Date.now();
 		while (Date.now() - start < 5000) {
-			const bulletin = await prisma.Bulletin.findFirst({
+			const bulletin = await prisma.bulletin.findFirst({
 				where: { address },
 				orderBy: { sequence: "desc" },
 			});
@@ -2319,7 +2566,7 @@ async function SyncClientRequest(address) {
 			}
 			await new Promise((resolve) => setTimeout(resolve, 500));
 		}
-		const bulletin = await prisma.Bulletin.findFirst({
+		const bulletin = await prisma.bulletin.findFirst({
 			where: { address },
 			orderBy: { sequence: "desc" },
 		});
@@ -2334,7 +2581,7 @@ async function SyncClientRequest(address) {
 	}
 
 	// file — only fetch files that don't already have an active request
-	const pending_files = await prisma.File.findMany({
+	const pending_files = await prisma.file.findMany({
 		where: {
 			is_saved: false,
 			bulletins: {
@@ -2364,7 +2611,7 @@ async function SyncClientRequest(address) {
 
 	// ecdh
 	if (isAllowed(address)) {
-		const dh = await prisma.ECDH.findFirst({
+		const dh = await prisma.eCDH.findFirst({
 			where: {
 				OR: [
 					{
@@ -2380,9 +2627,9 @@ async function SyncClientRequest(address) {
 		});
 		if (dh != null) {
 			if (dh.json1 === "") {
-				SendMessage(address, dh.json2);
+				SendMessage(address, dh.json2 as string);
 			} else if (dh.json2 === "") {
-				SendMessage(address, dh.json1);
+				SendMessage(address, dh.json1 as string);
 			}
 		}
 	} else {
@@ -2400,13 +2647,16 @@ async function SyncClientRequest(address) {
 	}
 }
 
-async function checkMessage(ws, message, isFromNode = false) {
+async function checkMessage(ws: WebSocket, message: string, isFromNode = false): Promise<void> {
 	const connAddress = fetchConnAddress(ws);
 	ConsoleInfo(
 		`###################LOG################### Client Message (from=${connAddress || "unknown"}, isFromNode=${isFromNode}):`,
 	);
-	ConsoleInfo(`${message}`);
-	// ConsoleInfo(`${message.slice(0, 512)}`)
+	// 不打印完整消息（bulletin 的 Content 可能很大，console I/O 慢且刷屏）。
+	// 只打长度 + 前 160 字符预览，够定位用。
+	ConsoleInfo(
+		`[checkMessage] len=${message.length} preview=${message.slice(0, 160)}${message.length > 160 ? "..." : ""}`,
+	);
 	const json = MsgValidate(message);
 	if (json === false) {
 		ConsoleWarn(
@@ -2425,13 +2675,16 @@ async function checkMessage(ws, message, isFromNode = false) {
 			`[checkMessage] ActionCode=${json.ActionCode} MessageCode=${json.MessageCode ?? "-"} from ${connAddress || "unknown"} (isFromNode=${isFromNode}), acknowledged`,
 		);
 	} else if (json.ObjectType) {
-		ConsoleInfo(
-			`[checkMessage] ObjectType=${json.ObjectType} from ${connAddress}`,
-		);
-		await handleObject(connAddress, message, json, isFromNode);
+		// Node connections are tracked by URL (`_nodeUrl`) but not by address
+		// (`_connAddress`). Without this fallback every reply addressed to `from`
+		// for a node-originated object (e.g. ServerAddressList / 403) hit
+		// `sendTo(null)` and the whole pull-sync pipeline stalled.
+		const objFrom = connAddress ?? fetchNodeConnURL(ws);
+		ConsoleInfo(`[checkMessage] ObjectType=${json.ObjectType} from ${objFrom}`);
+		await handleObject(objFrom as string, message, json, isFromNode);
 	} else if (json.Action) {
 		ConsoleInfo(`[checkMessage] Action=${json.Action} from ${connAddress}`);
-		const address = rippleKeyPairs.deriveAddress(json.PublicKey);
+		const address = rippleKeyPairs.deriveAddress(json.PublicKey as string);
 		if (Conns[address] === ws) {
 			await handleAction(address, message, json);
 		} else {
@@ -2462,7 +2715,7 @@ async function checkMessage(ws, message, isFromNode = false) {
 					return;
 				}
 
-				if (json.Timestamp + DECLARE_TIMESTAMP_TOLERANCE_MS < Date.now()) {
+				if (json.Timestamp as number + DECLARE_TIMESTAMP_TOLERANCE_MS < Date.now()) {
 					ConsoleWarn(
 						`[terminateConn] TimestampInvalid: msg=${json.Timestamp} now=${Date.now()} action=${json.Action}`,
 					);
@@ -2481,21 +2734,21 @@ async function checkMessage(ws, message, isFromNode = false) {
 					Conns[address] === undefined &&
 					json.Action === ActionCode.Declare
 				) {
-					const isNodeConnection = json.URL != null && CheckServerURL(json.URL);
+					const isNodeConnection = json.URL != null && CheckServerURL(json.URL as string);
 
 					// new connection and new address
 					ConsoleWarn(
 						`connected <===> ${isNodeConnection ? "node" : "client"} : <${address}>`,
 					);
-					ws._connAddress = address;
+					(ws as any)._connAddress = address;
 					Conns[address] = ws;
 					if (isNodeConnection) {
 						// Server Connection
-						NodeList.push({
-							URL: json.URL,
+						(NodeList as any[]).push({
+							URL: json.URL as string,
 						});
-						NodeList = UniqArray(NodeList);
-						SyncNodeData(json.URL);
+						NodeList = UniqArray(NodeList) as any;
+						SyncNodeData(json.URL as string);
 					}
 
 					const msg = GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL, SiteURL);
@@ -2520,9 +2773,11 @@ async function checkMessage(ws, message, isFromNode = false) {
 								"Kicked by new connection",
 							),
 						);
-					} catch {}
+					} catch {
+						/* best-effort: notify-then-close; a send failure must not block the kick */
+					}
 					Conns[address].close();
-					ws._connAddress = address;
+					(ws as any)._connAddress = address;
 					Conns[address] = ws;
 				} else {
 					// Fallback: unregistered connection with non-Declare message
@@ -2545,11 +2800,11 @@ async function checkMessage(ws, message, isFromNode = false) {
 
 // === Node Interaction ===
 /** Send to a peer node by URL (uses NodeConns map). */
-function SendToNode(url, message) {
+function SendToNode(url: string, message: string | Buffer): void {
 	sendTo(url, message, NodeConns);
 }
 
-function fetchFileFromNode(url, address, hash, chunk_cursor) {
+function fetchFileFromNode(url: string, address: string, hash: string, chunk_cursor: number): void {
 	const nonce = genFileNonce();
 	const tmp = {
 		Type: FileRequestType.File,
@@ -2582,13 +2837,13 @@ function fetchFileFromNode(url, address, hash, chunk_cursor) {
 	}
 }
 
-async function downloadBulletinFile(url) {
+async function downloadBulletinFile(url: string): Promise<void> {
 	const address = fetchNodeConnURL(NodeConns[url]);
 	if (address === null) {
 		return;
 	}
 
-	const file_list = await prisma.File.findMany({
+	const file_list = await prisma.file.findMany({
 		where: {
 			is_saved: {
 				equals: false,
@@ -2608,12 +2863,12 @@ async function downloadBulletinFile(url) {
 	if (file_list && file_list.length > 0) {
 		for (let i = 0; i < file_list.length; i++) {
 			const file = file_list[i];
-			fetchFileFromNode(url, address, file.hash, file.chunk_cursor + 1);
+			enqueueFileFetch(url, address, file.hash, file.chunk_cursor + 1, true);
 		}
 	}
 }
 
-function pullBulletin(url) {
+function pullBulletin(url: string): void {
 	// clone all bulletin from server
 	// pull step 1: fetch all account
 	const msg = GenServerAddressListRequest(1, SelfPublicKey, SelfPrivateKey);
@@ -2627,7 +2882,7 @@ function pullBulletin(url) {
  * @param {string} url - WebSocket URL of the peer node to push bulletins to
  * @returns {Promise<void>}
  */
-async function pushBulletin(url) {
+async function pushBulletin(url: string): Promise<void> {
 	// Use GROUP BY to get max(sequence) per address in a single query instead of loading all rows
 	const whereClause =
 		WhiteList.length > 0
@@ -2637,7 +2892,7 @@ async function pushBulletin(url) {
 		`SELECT address, MAX(sequence) as max_seq FROM "Bulletin" ${whereClause} GROUP BY address`,
 	);
 
-	for (const row of bulletin_list) {
+	for (const row of (bulletin_list as any[])) {
 		const msg = GenBulletinRequest(
 			String(row.address),
 			Number(row.max_seq) + 1,
@@ -2649,25 +2904,25 @@ async function pushBulletin(url) {
 	}
 }
 
-function SyncNodeData(url) {
+function SyncNodeData(url: string): void {
 	ConsoleWarn(`sync node data`);
 	pullBulletin(url);
 	pushBulletin(url);
 	downloadBulletinFile(url);
 }
 
-function connectNode(node) {
+function connectNode(node: { URL: string }): void {
 	ConsoleInfo(
 		`--------------------------connect to node--------------------------`,
 	);
 	ConsoleWarn(node);
-	const ws = new WebSocket(node.URL);
+	const ws = new WebSocket(node.URL as string);
 	ws.on("open", function open() {
 		ConsoleWarn(`connected <===> ${node.URL}`);
 		ws.send(GenDeclare(SelfPublicKey, SelfPrivateKey, SelfURL));
-		ws._nodeUrl = node.URL;
-		NodeConns[node.URL] = ws;
-		SyncNodeData(node.URL);
+		(ws as any)._nodeUrl = node.URL as string;
+		NodeConns[node.URL as string] = ws;
+		SyncNodeData(node.URL as string);
 	});
 
 	ws.on("message", async (data, isBinary) => {
@@ -2678,7 +2933,7 @@ function connectNode(node) {
 				const message = data.toString();
 				await checkMessage(ws, message, true);
 			}
-		} catch (err) {
+		} catch (err: any) {
 			ConsoleError(
 				`[node-message-error] Failed to process node message from ${fetchNodeConnURL(ws)}: ${err.message}`,
 			);
@@ -2692,7 +2947,7 @@ function connectNode(node) {
 		try {
 			ConsoleWarn(`disconnected <=X=> ${node.URL}`);
 			terminateConn(ws);
-		} catch (err) {
+		} catch (err: any) {
 			ConsoleError(
 				`[node-close-error] Failed to handle node close for ${node.URL}: ${err.message}`,
 			);
@@ -2704,8 +2959,8 @@ function connectNode(node) {
 	});
 }
 
-function keepNodeConn() {
-	const notConnected = [];
+function keepNodeConn(): void {
+	const notConnected: any[] = [];
 	NodeList.forEach((node) => {
 		if (NodeConns[node.URL] === undefined) {
 			notConnected.push(node);
@@ -2726,7 +2981,7 @@ function keepNodeConn() {
 	}
 }
 
-function keepNodeSync() {
+function keepNodeSync(): void {
 	ConsoleWarn(
 		`--------------------------keepNodeSync--------------------------`,
 	);
@@ -2737,8 +2992,8 @@ function keepNodeSync() {
 	});
 }
 
-async function loadgroupMap() {
-	const group_list = await prisma.Group.findMany({
+async function loadgroupMap(): Promise<void> {
+	const group_list = await prisma.group.findMany({
 		where: { deleted_at: null },
 	});
 	for (let i = 0; i < group_list.length; i++) {
@@ -2756,14 +3011,14 @@ async function loadgroupMap() {
 	ConsoleInfo(JSON.stringify(groupMap, null, 2));
 }
 
-async function printStat() {
-	const bulletinCount = await prisma.Bulletin.count();
+async function printStat(): Promise<void> {
+	const bulletinCount = await prisma.bulletin.count();
 	ConsoleWarn(`BulletinCount: ${bulletinCount}`);
 
-	const fileCount = await prisma.File.count();
+	const fileCount = await prisma.file.count();
 	ConsoleWarn(`****FileCount: ${fileCount}`);
 
-	const addressCount = await prisma.Bulletin.groupBy({
+	const addressCount = await prisma.bulletin.groupBy({
 		by: "address",
 	});
 	ConsoleWarn(`*AddressCount: ${addressCount.length}`);
@@ -2778,9 +3033,9 @@ async function printStat() {
 // Phase 3: Upsert file records and connect Bulletin <-> File relations per-bulletin,
 //           then fetch any missing chunks from peer nodes.
 // Phase 4: Batch-create Reply (quote) links in a single insertMany to avoid N+1 queries.
-async function refreshData() {
+async function refreshData(): Promise<void> {
 	// Fetch all bulletins needed for processing
-	const bulletin_list = await prisma.Bulletin.findMany({
+	const bulletin_list = await prisma.bulletin.findMany({
 		select: {
 			hash: true,
 			pre_hash: true,
@@ -2796,11 +3051,11 @@ async function refreshData() {
 		const bulletin = bulletin_list[i];
 		if (bulletin.sequence != 1) {
 			try {
-				await prisma.Bulletin.update({
+				await prisma.bulletin.update({
 					where: { hash: bulletin.pre_hash },
 					data: { next_hash: bulletin.hash },
 				});
-			} catch (e) {
+			} catch (e: any) {
 				ConsoleDebug(
 					`[refreshData] Failed to update next_hash for pre_hash ${bulletin.pre_hash} -> ${bulletin.hash}: ${e.message}`,
 				);
@@ -2809,8 +3064,8 @@ async function refreshData() {
 	}
 
 	// Pre-parse all bulletin JSON upfront
-	const parsed = bulletin_list
-		.map((b) => {
+	const parsed = (bulletin_list as any[])
+		.map((b: any) => {
 			let bJson;
 			try {
 				bJson = JSON.parse(b.json);
@@ -2819,7 +3074,7 @@ async function refreshData() {
 			}
 			return bJson ? { hash: b.hash, json: bJson, signed_at: b.signed_at } : null;
 		})
-		.filter(Boolean);
+		.filter(Boolean) as any[];
 
 	// Phase 2: Batch-create all unique tags across every bulletin, then bulk-connect
 	const allTagNames = new Set();
@@ -2830,8 +3085,8 @@ async function refreshData() {
 	}
 
 	if (allTagNames.size > 0) {
-		await prisma.Tag.createMany({
-			data: [...allTagNames].map((name) => ({ name })),
+		await prisma.tag.createMany({
+			data: [...allTagNames].map((name) => ({ name: name as string })),
 			skipDuplicates: true,
 		});
 	}
@@ -2842,17 +3097,17 @@ async function refreshData() {
 		const batch = parsed
 			.slice(i, i + tagBatchSize)
 			.filter(
-				({ json }) => json.Tag && Array.isArray(json.Tag) && json.Tag.length > 0,
+				({ json }: any) => json.Tag && Array.isArray(json.Tag) && json.Tag.length > 0,
 			);
 		if (batch.length === 0) continue;
 
-		await prisma.$transaction(
-			batch.map(({ hash, json: bJson }) =>
-				prisma.Bulletin.update({
-					where: { hash },
+await prisma.$transaction(
+			batch.map(({ hash, json: bJson }: any) =>
+				prisma.bulletin.update({
+					where: { hash: hash as string },
 					data: {
 						tags: {
-							connect: [...new Set(bJson.Tag)].map((name) => ({ name })),
+							connect: [...new Set(bJson.Tag as string[])].map((name) => ({ name: name as string })),
 						},
 					},
 				}),
@@ -2861,10 +3116,10 @@ async function refreshData() {
 	}
 
 	// Phase 3: Files - must stay per-bulletin (BindBulletinFile ties files to one bulletin)
-	for (const { hash, json: bJson } of parsed) {
+	for (const { hash, json: bJson } of (parsed as any[])) {
 		if (bJson.File) {
-			const bulletin_address = rippleKeyPairs.deriveAddress(bJson.PublicKey);
-			const files_to_fetch = await BindBulletinFile(hash, bJson.File);
+			const bulletin_address = rippleKeyPairs.deriveAddress(bJson.PublicKey as string);
+			const files_to_fetch = await BindBulletinFile(hash as string, bJson.File) as any[];
 			for (let i = 0; i < files_to_fetch.length; i++) {
 				const file = files_to_fetch[i];
 				if (!file.is_saved) {
@@ -2880,15 +3135,15 @@ async function refreshData() {
 	}
 
 	// Phase 4: Batch-quote links - collect all new replies, insert in one shot
-	const existingQuotes = await prisma.Reply.findMany({
+	const existingQuotes = await prisma.reply.findMany({
 		select: { post_hash: true, reply_hash: true },
 	});
 	const existingSet = new Set(
 		existingQuotes.map((q) => `${q.post_hash}:${q.reply_hash}`),
 	);
 
-	const newReplies = [];
-	for (const { hash, json: bJson, signed_at } of parsed) {
+	const newReplies: any[] = [];
+	for (const { hash, json: bJson, signed_at } of (parsed as any[])) {
 		if (bJson.Quote && Array.isArray(bJson.Quote)) {
 			for (const quote of bJson.Quote) {
 				const key = `${quote.Hash}:${hash}`;
@@ -2905,14 +3160,14 @@ async function refreshData() {
 	}
 
 	if (newReplies.length > 0) {
-		await prisma.Reply.createMany({ data: newReplies, skipDuplicates: true });
+		await prisma.reply.createMany({ data: newReplies, skipDuplicates: true });
 		ConsoleInfo(
 			`[refreshData] Linked ${newReplies.length} new quote(s) in batch`,
 		);
 	}
 }
 
-function startServerDaemon() {
+function startServerDaemon(): void {
 	if (ServerDaemon === null) {
 		ServerDaemon = new WebSocketServer({
 			port: 8100, // to bind on 80, must use "sudo node main.js"
@@ -2929,7 +3184,7 @@ function startServerDaemon() {
 						const message = data.toString();
 						await checkMessage(ws, message, false);
 					}
-				} catch (err) {
+				} catch (err: any) {
 					ConsoleError(
 						`[message-error] Failed to process client message: ${err.message}`,
 					);
@@ -2947,7 +3202,7 @@ function startServerDaemon() {
 						delete Conns[connAddress];
 						clearSubscribe(connAddress);
 					}
-				} catch (err) {
+				} catch (err: any) {
 					ConsoleError(
 						`[close-error] Failed to handle client close: ${err.message}`,
 					);
@@ -2961,7 +3216,7 @@ function startServerDaemon() {
 	}
 }
 
-async function main() {
+async function main(): Promise<void> {
 	fs.mkdirSync(path.resolve(`./${FileDir}`), { recursive: true });
 	fs.mkdirSync(path.resolve(`./${AvatarDir}`), { recursive: true });
 
@@ -2982,16 +3237,16 @@ async function main() {
 		config = JSON.parse(config);
 		ConsoleWarn(`*******Config:`);
 		ConsoleInfo(JSON.stringify(config, null, 2));
-		if (config.SelfURL !== "") {
-			SelfURL = config.SelfURL;
+		if ((config as any).SelfURL !== "") {
+			SelfURL = (config as any).SelfURL;
 		}
-		if (config.SiteURL) {
-			SiteURL = config.SiteURL;
+		if ((config as any).SiteURL) {
+			SiteURL = (config as any).SiteURL;
 		}
-		NodeList = config.NodeList;
+		NodeList = (config as any).NodeList;
 		ConsoleInfo(JSON.stringify(NodeList, null, 2));
 
-		const wl = config.WhiteList;
+		const wl = (config as any).WhiteList;
 		if (Array.isArray(wl)) {
 			WhiteList = wl;
 		}
@@ -3017,14 +3272,14 @@ async function main() {
 				purgeExpiredFileRequests();
 			}, FILE_PURGE_INTERVAL_MS);
 		}
-	} catch (error) {
+	} catch (error: any) {
 		ConsoleError(
 			`[main] Failed to load node config from ${ConfigPath}: ${error.message}`,
 		);
 	}
 }
 
-async function gracefulShutdown(signal) {
+async function gracefulShutdown(signal: string): Promise<void> {
 	ConsoleWarn(`[${signal}] Shutting down gracefully...`);
 	if (jobNodeConn) clearInterval(jobNodeConn);
 	if (jobNodeSync) clearInterval(jobNodeSync);
@@ -3040,7 +3295,9 @@ async function gracefulShutdown(signal) {
 			if (Conns[addr].readyState === WebSocket.OPEN) {
 				Conns[addr].send(shutdownMsg);
 			}
-		} catch {}
+		} catch {
+			/* best-effort: shutdown notice; connection may already be gone */
+		}
 	}
 	// Give clients time to receive the notification
 	await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -3048,12 +3305,16 @@ async function gracefulShutdown(signal) {
 	for (const addr in Conns) {
 		try {
 			Conns[addr].close();
-		} catch {}
+		} catch {
+			/* best-effort: close may throw if already closing */
+		}
 	}
 	for (const url in NodeConns) {
 		try {
 			NodeConns[url].close();
-		} catch {}
+		} catch {
+			/* best-effort: close may throw if already closing */
+		}
 	}
 	ConsoleWarn("All connections closed. Exiting.");
 	await prisma.$disconnect();

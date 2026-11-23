@@ -1,8 +1,8 @@
-import { ActionCode, MessageCode, ObjectType } from "./msg_const.js";
+import { ActionCode, ObjectType } from "./msg_const.js";
 import { SignJson } from "./util.js";
 
-function GenDeclare(pk, sk, url, siteUrl) {
-	const json = {
+function GenDeclare(pk: string, sk: string, url: string | undefined, siteUrl?: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.Declare,
 		URL: url,
 		Timestamp: Date.now(),
@@ -12,8 +12,8 @@ function GenDeclare(pk, sk, url, siteUrl) {
 	return JSON.stringify(SignJson(json, sk));
 }
 
-function GenFileRequest(type, hash, nonce, chunk_cursor, pk, sk) {
-	const json = {
+function GenFileRequest(type: number, hash: string, nonce: number, chunk_cursor: number, pk: string, sk: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.FileRequest,
 		FileType: type,
 		Hash: hash,
@@ -26,8 +26,8 @@ function GenFileRequest(type, hash, nonce, chunk_cursor, pk, sk) {
 }
 
 // ***Avatar***
-function GenAvatarRequest(list, pk, sk) {
-	const json = {
+function GenAvatarRequest(list: { Address: string; SignedAt: number }[], pk: string, sk: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.AvatarRequest,
 		List: list,
 		Timestamp: Date.now(),
@@ -36,8 +36,8 @@ function GenAvatarRequest(list, pk, sk) {
 	return JSON.stringify(SignJson(json, sk));
 }
 
-function GenBulletinRequest(address, sequence, to, pk, sk) {
-	const json = {
+function GenBulletinRequest(address: string, sequence: number, to: string, pk: string, sk: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.BulletinRequest,
 		Address: address,
 		Sequence: sequence,
@@ -48,8 +48,8 @@ function GenBulletinRequest(address, sequence, to, pk, sk) {
 	return JSON.stringify(SignJson(json, sk));
 }
 
-function GenBulletinRequestByHash(hash, to, pk, sk) {
-	const json = {
+function GenBulletinRequestByHash(hash: string, to: string, pk: string, sk: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.BulletinRequest,
 		Hash: hash,
 		To: to,
@@ -59,8 +59,8 @@ function GenBulletinRequestByHash(hash, to, pk, sk) {
 	return JSON.stringify(SignJson(json, sk));
 }
 
-function GenServerAddressListRequest(page, pk, sk) {
-	const json = {
+function GenServerAddressListRequest(page: number, pk: string, sk: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.ServerAddressRequest,
 		Page: page,
 		Timestamp: Date.now(),
@@ -69,8 +69,8 @@ function GenServerAddressListRequest(page, pk, sk) {
 	return JSON.stringify(SignJson(json, sk));
 }
 
-function GenServerAddressList(page, total_page, address_list) {
-	const json = {
+function GenServerAddressList(page: number, total_page: number, address_list: string[]): string {
+	const json: Record<string, unknown> = {
 		ObjectType: ObjectType.ServerAddressList,
 		Page: page,
 		TotalPage: total_page,
@@ -79,8 +79,8 @@ function GenServerAddressList(page, total_page, address_list) {
 	return JSON.stringify(json);
 }
 
-function GenReplyBulletinList(hash, page, total_page, bulletin_list) {
-	const json = {
+function GenReplyBulletinList(hash: string, page: number, total_page: number, bulletin_list: unknown[]): string {
+	const json: Record<string, unknown> = {
 		ObjectType: ObjectType.ReplyBulletinList,
 		Hash: hash,
 		Page: page,
@@ -90,8 +90,8 @@ function GenReplyBulletinList(hash, page, total_page, bulletin_list) {
 	return JSON.stringify(json);
 }
 
-function GenTagBulletinList(tag, page, total_page, bulletin_list) {
-	const json = {
+function GenTagBulletinList(tag: string, page: number, total_page: number, bulletin_list: unknown[]): string {
+	const json: Record<string, unknown> = {
 		ObjectType: ObjectType.TagBulletinList,
 		Tag: tag,
 		Page: page,
@@ -101,8 +101,8 @@ function GenTagBulletinList(tag, page, total_page, bulletin_list) {
 	return JSON.stringify(json);
 }
 
-function GenRandomBulletinList(bulletin_list) {
-	const json = {
+function GenRandomBulletinList(bulletin_list: unknown[]): string {
+	const json: Record<string, unknown> = {
 		ObjectType: ObjectType.RandomBulletinList,
 		List: bulletin_list,
 	};
@@ -111,13 +111,13 @@ function GenRandomBulletinList(bulletin_list) {
 
 // ***Private***
 function GenPrivateMessageSync(
-	pair_address,
-	self_sequence,
-	pair_sequence,
-	pk,
-	sk,
-) {
-	const json = {
+	pair_address: string,
+	self_sequence: number,
+	pair_sequence: number,
+	pk: string,
+	sk: string,
+): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.PrivateMessageSync,
 		To: pair_address,
 		SelfSequence: self_sequence,
@@ -129,8 +129,8 @@ function GenPrivateMessageSync(
 }
 
 // ***Group***
-function GenGroupSync(pk, sk) {
-	const json = {
+function GenGroupSync(pk: string, sk: string): string {
+	const json: Record<string, unknown> = {
 		Action: ActionCode.GroupSync,
 		Timestamp: Date.now(),
 		PublicKey: pk,
@@ -141,11 +141,8 @@ function GenGroupSync(pk, sk) {
 // === Control-Plane Generators (unsigned) ===
 /**
  * Generate error notification message
- * @param {number} code - MessageCode error code (701-704)
- * @param {string} message - Human-readable error description
- * @returns {string} JSON string
  */
-function GenServerNotifyError(code, message) {
+function GenServerNotifyError(code: number, message: string): string {
 	return JSON.stringify({
 		ActionCode: ActionCode.ServerNotify,
 		MessageCode: code,
@@ -155,12 +152,9 @@ function GenServerNotifyError(code, message) {
 
 /**
  * Generate info notification message (KickedByNewConn, ServerShutdown, SyncComplete)
- * @param {number} code - MessageCode notification code (710-712)
- * @param {string} [message] - Optional description
- * @returns {string} JSON string
  */
-function GenServerNotifyInfo(code, message) {
-	const msg = {
+function GenServerNotifyInfo(code: number, message?: string): string {
+	const msg: Record<string, unknown> = {
 		ActionCode: ActionCode.ServerNotify,
 		MessageCode: code,
 	};
@@ -170,10 +164,8 @@ function GenServerNotifyInfo(code, message) {
 
 /**
  * Generate cache success confirmation
- * @param {number} code - MessageCode cache code (720/721/723)
- * @returns {string} JSON string
  */
-function GenServerNotifyCache(code) {
+function GenServerNotifyCache(code: number): string {
 	return JSON.stringify({
 		ActionCode: ActionCode.ServerNotify,
 		MessageCode: code,
@@ -182,13 +174,9 @@ function GenServerNotifyCache(code) {
 
 /**
  * Generate file transfer progress notification
- * @param {number} code - MessageCode file code (730-732)
- * @param {string} hash - File hash identifier
- * @param {object} [progress] - Optional {ReceivedBytes, TotalBytes}
- * @returns {string} JSON string
  */
-function GenServerNotifyFileProgress(code, hash, progress) {
-	const msg = {
+function GenServerNotifyFileProgress(code: number, hash: string, progress?: { ReceivedBytes: number; TotalBytes: number }): string {
+	const msg: Record<string, unknown> = {
 		ActionCode: ActionCode.ServerNotify,
 		MessageCode: code,
 		Hash: hash,

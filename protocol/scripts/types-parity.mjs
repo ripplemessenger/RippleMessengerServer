@@ -64,18 +64,12 @@ for (const table of TABLES) {
   }
 }
 
-// Scalar declarations must exist too.
-for (const scalar of [
-  'Epoch',
-  'GenesisAddress',
-  'GenesisHash',
-  'MasterAddress',
-  'PostAddress',
-  'ListItemMax',
-  'GroupMemberMin',
-  'GroupMemberMax',
-  'DefaultServer'
-]) {
+// Scalar declarations must exist too. Derive the list from the runtime so it
+// can't go stale when a new constant is added (the old hardcoded list had
+// drifted: it checked a non-existent DefaultServer and missed
+// ControlActionCode / ErrorMessageMap).
+const SCALARS = Object.keys(constants).filter((k) => !TABLES.includes(k));
+for (const scalar of SCALARS) {
   if (!new RegExp(`declare const ${scalar}\\s*:`).test(dts)) {
     console.log(`  ✗ ${scalar}: not declared in .d.ts`);
     bad++;
@@ -86,7 +80,7 @@ for (const scalar of [
     checked++;
   }
 }
-console.log('  ✓ scalars declared and defined at runtime');
+console.log(`  ✓ ${SCALARS.length} scalars declared and defined at runtime`);
 
 console.log(`\n${'='.repeat(60)}`);
 console.log(`checked ${checked} values, ${bad} problem(s)`);
